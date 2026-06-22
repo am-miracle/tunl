@@ -1,0 +1,15 @@
+[services.postgres]
+local_port = 5432
+target = "kubectl://default/postgres-0:5432"
+
+[services.redis]
+local_port = 6379
+target = "docker://redis:6379"
+
+[services.auth]
+local_port = 8080
+target = "remote://staging.company.com:8080"
+
+[services.api-gateway]
+local_port = 3000
+target = "kubectl://gateway/api-gw-pod:3000"

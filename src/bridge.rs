@@ -1,10 +1,6 @@
 use std::io;
 
-use tokio::io::{AsyncRead, AsyncWrite};
-
-pub trait AsyncReadWrite: AsyncRead + AsyncWrite + Send + Unpin {}
-
-impl<T: AsyncRead + AsyncWrite + Send + Unpin> AsyncReadWrite for T {}
+use crate::io::AsyncReadWrite;
 
 // Copies bytes between local and target in both directions concurrently.
 //

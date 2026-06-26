@@ -9,14 +9,12 @@ use crate::io::AsyncReadWrite;
 
 #[async_trait]
 pub trait Target: Send + Sync + std::fmt::Debug {
-    /// Open a bidirectional byte stream to the real service
+    /// open a bidirectional byte stream to the real service
     async fn connect(&self) -> anyhow::Result<Box<dyn AsyncReadWrite>>;
-
-    /// Human-readable description used in log lines.
     fn describe(&self) -> String;
 }
 
-/// Parse a target URI into the right boxed Target implementation
+/// parse a target URI into the right boxed Target implementation
 pub fn from_uri(service: &str, uri: &str) -> Result<Box<dyn Target>> {
     if let Some(rest) = uri.strip_prefix("kubectl://") {
         let (namespace, pod_port) = rest.split_once('/').ok_or_else(|| Error::InvalidTarget {
@@ -60,7 +58,7 @@ pub fn from_uri(service: &str, uri: &str) -> Result<Box<dyn Target>> {
         let port = parse_port(service, uri, port_str)?;
         require_nonempty(service, uri, "host", host)?;
         Ok(Box::new(remote::RemoteTarget {
-            // Store pre-joined host:port so TcpStream::connect gets a single
+            // store pre-joined host:port so TcpStream::connect gets a single
             // string it can resolve directly without any formatting at call time
             address: format!("{host}:{port}"),
         }))

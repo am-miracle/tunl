@@ -46,10 +46,6 @@ impl Config {
 
         check_duplicate_ports(&self.services)?;
 
-        for (name, service) in &self.services {
-            validate_target(name, &service.target)?;
-        }
-
         Ok(())
     }
 }
@@ -83,73 +79,4 @@ fn check_duplicate_ports(services: &HashMap<String, Service>) -> Result<()> {
         seen.insert(port, name);
     }
     Ok(())
-}
-
-fn validate_target(service: &str, target: &str) -> Result<()> {
-    if let Some(rest) = target.strip_prefix("kubectl://") {
-        let (namespace, pod_port) = rest.split_once('/').ok_or_else(|| {
-            malformed_target(
-                service,
-                target,
-                "expected kubectl://<namespace>/<pod>:<port>",
-            )
-        })?;
-        let (pod, port) = pod_port.rsplit_once(':').ok_or_else(|| {
-            malformed_target(
-                service,
-                target,
-                "expected kubectl://<namespace>/<pod>:<port>",
-            )
-        })?;
-        require_nonempty(service, target, "namespace", namespace)?;
-        require_nonempty(service, target, "pod name", pod)?;
-        require_valid_port_str(service, target, port)
-    } else if let Some(rest) = target.strip_prefix("docker://") {
-        let (container, port) = rest.rsplit_once(':').ok_or_else(|| {
-            malformed_target(service, target, "expected docker://<container>:<port>")
-        })?;
-        require_nonempty(service, target, "container name", container)?;
-        require_valid_port_str(service, target, port)
-    } else if let Some(rest) = target.strip_prefix("remote://") {
-        let (host, port) = rest
-            .rsplit_once(':')
-            .ok_or_else(|| malformed_target(service, target, "expected remote://<host>:<port>"))?;
-        require_nonempty(service, target, "host", host)?;
-        require_valid_port_str(service, target, port)
-    } else {
-        Err(Error::UnknownScheme {
-            service: service.to_string(),
-            target: target.to_string(),
-        })
-    }
-}
-
-fn malformed_target(service: &str, target: &str, reason: &str) -> Error {
-    Error::InvalidTarget {
-        service: service.to_string(),
-        target: target.to_string(),
-        reason: reason.to_string(),
-    }
-}
-
-fn require_nonempty(service: &str, target: &str, field: &str, value: &str) -> Result<()> {
-    if value.is_empty() {
-        return Err(malformed_target(
-            service,
-            target,
-            &format!("{field} must not be empty"),
-        ));
-    }
-    Ok(())
-}
-
-fn require_valid_port_str(service: &str, target: &str, port: &str) -> Result<()> {
-    match port.parse::<u16>() {
-        Ok(1..=u16::MAX) => Ok(()),
-        _ => Err(malformed_target(
-            service,
-            target,
-            &format!("{port:?} is not a valid port (1-65535)"),
-        )),
-    }
 }

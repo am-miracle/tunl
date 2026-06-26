@@ -109,25 +109,6 @@ fn rejects_empty_services() {
 }
 
 #[test]
-fn rejects_unknown_target_scheme() {
-    let file = write_config(
-        r#"
-        [services.postgres]
-        local_port = 5432
-        target = "ftp://old-school:21"
-        "#,
-    );
-
-    let err = Config::load(file.path()).unwrap_err();
-
-    assert_eq!(
-        err.to_string(),
-        "[postgres] target \"ftp://old-school:21\" has an unrecognized scheme \
-         — expected kubectl://, docker://, or remote://"
-    );
-}
-
-#[test]
 fn rejects_malformed_toml() {
     let file = write_config("this is not valid toml {{{");
 
@@ -146,80 +127,5 @@ fn rejects_nonexistent_file() {
     assert!(
         err.to_string().starts_with("failed to read config file"),
         "unexpected error message: {err}"
-    );
-}
-
-#[test]
-fn rejects_kubectl_target_missing_namespace() {
-    let file = write_config(
-        r#"
-        [services.postgres]
-        local_port = 5432
-        target = "kubectl://postgres-0:5432"
-        "#,
-    );
-
-    let err = Config::load(file.path()).unwrap_err();
-
-    assert_eq!(
-        err.to_string(),
-        "[postgres] target \"kubectl://postgres-0:5432\" is malformed: \
-         expected kubectl://<namespace>/<pod>:<port>"
-    );
-}
-
-#[test]
-fn rejects_docker_target_missing_port() {
-    let file = write_config(
-        r#"
-        [services.redis]
-        local_port = 6379
-        target = "docker://redis"
-        "#,
-    );
-
-    let err = Config::load(file.path()).unwrap_err();
-
-    assert_eq!(
-        err.to_string(),
-        "[redis] target \"docker://redis\" is malformed: expected docker://<container>:<port>"
-    );
-}
-
-#[test]
-fn rejects_remote_target_missing_port() {
-    let file = write_config(
-        r#"
-        [services.auth]
-        local_port = 8080
-        target = "remote://staging.company.com"
-        "#,
-    );
-
-    let err = Config::load(file.path()).unwrap_err();
-
-    assert_eq!(
-        err.to_string(),
-        "[auth] target \"remote://staging.company.com\" is malformed: \
-         expected remote://<host>:<port>"
-    );
-}
-
-#[test]
-fn rejects_remote_target_with_invalid_port() {
-    let file = write_config(
-        r#"
-        [services.auth]
-        local_port = 8080
-        target = "remote://staging.company.com:notaport"
-        "#,
-    );
-
-    let err = Config::load(file.path()).unwrap_err();
-
-    assert_eq!(
-        err.to_string(),
-        "[auth] target \"remote://staging.company.com:notaport\" is malformed: \
-         \"notaport\" is not a valid port (1-65535)"
     );
 }

@@ -3,6 +3,7 @@ use std::process;
 use std::sync::Arc;
 
 use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 #[tokio::main]
@@ -21,8 +22,10 @@ async fn run() -> anyhow::Result<()> {
 
     info!(count = config.services.len(), "loaded services");
 
-    // Parse all targets before touching any ports so a bad URI exits cleanly.
-    let mut parsed = Vec::new();
+    let n = config.services.len();
+
+    // parse all targets before touching any ports so a bad URI exits cleanly
+    let mut parsed = Vec::with_capacity(n);
     for (name, service) in &config.services {
         let target = tunl::target::from_uri(name, &service.target)?;
         parsed.push((name.clone(), service.local_port as u16, target));
@@ -30,7 +33,7 @@ async fn run() -> anyhow::Result<()> {
 
     // pre-bind every port before spawning any tasks
     // a bind failure here exits before any tunnel starts — no partial startup
-    let mut ready = Vec::new();
+    let mut ready = Vec::with_capacity(n);
     for (name, port, target) in parsed {
         let listener = TcpListener::bind(("127.0.0.1", port))
             .await
@@ -39,9 +42,16 @@ async fn run() -> anyhow::Result<()> {
         ready.push((name, target, listener));
     }
 
-    let mut handles = Vec::new();
+    let token = CancellationToken::new();
+
+    let mut handles = Vec::with_capacity(n);
     for (name, target, listener) in ready {
-        handles.push(tokio::spawn(tunl::tunnel::run(name, target, listener)));
+        handles.push(tokio::spawn(tunl::tunnel::run(
+            name,
+            target,
+            listener,
+            token.child_token(),
+        )));
     }
 
     for handle in handles {

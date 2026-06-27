@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio_util::sync::CancellationToken;
 
 // Boots a TCP echo server that reflects every byte back to the sender.
 async fn spawn_echo_server() -> u16 {
@@ -37,6 +38,7 @@ async fn echo_round_trip() {
         "test".to_string(),
         target,
         tunnel_listener,
+        CancellationToken::new(),
     ));
 
     let mut client = TcpStream::connect(("127.0.0.1", tunnel_port))

@@ -1863,6 +1863,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bollard",
+ "futures-util",
  "k8s-openapi",
  "kube",
  "serde",

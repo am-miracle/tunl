@@ -105,7 +105,6 @@ async fn connect_and_bridge(
     let result = tokio::select! {
         r = bridge.as_mut() => r,
         _ = token.cancelled() => {
-            // Shutdown fired — give the in-flight copy a deadline to flush.
             tokio::time::timeout(DRAIN_TIMEOUT, bridge.as_mut())
                 .await
                 .unwrap_or(Ok(()))

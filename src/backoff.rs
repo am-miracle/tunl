@@ -21,7 +21,6 @@ impl Backoff {
         }
     }
 
-    /// Return the current delay and advance to the next (doubled, capped) value.
     pub fn delay(&mut self) -> Duration {
         let d = self.current;
         self.current = (self.current * 2).min(self.cap);

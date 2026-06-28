@@ -1,10 +1,15 @@
 use std::path::PathBuf;
 use std::process;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::net::TcpListener;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
+
+/// How long main waits for all tunnel tasks to drain before giving up.
+const SHUTDOWN_DRAIN: Duration = Duration::from_secs(10);
 
 #[tokio::main]
 async fn main() {
@@ -44,20 +49,28 @@ async fn run() -> anyhow::Result<()> {
 
     let token = CancellationToken::new();
 
-    let mut handles = Vec::with_capacity(n);
+    let mut set: JoinSet<()> = JoinSet::new();
     for (name, target, listener) in ready {
-        handles.push(tokio::spawn(tunl::tunnel::run(
+        set.spawn(tunl::tunnel::run(
             name,
             target,
             listener,
             token.child_token(),
-        )));
+        ));
     }
 
-    for handle in handles {
-        handle.await?;
-    }
+    tokio::signal::ctrl_c().await?;
+    info!("shutdown_started");
+    token.cancel();
 
+    // Give all tunnel tasks (and their in-flight bridges) time to drain.
+    tokio::time::timeout(SHUTDOWN_DRAIN, async {
+        while set.join_next().await.is_some() {}
+    })
+    .await
+    .ok();
+
+    info!("shutdown_complete");
     Ok(())
 }
 

@@ -1,7 +1,10 @@
+use std::net::SocketAddr;
+use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -10,6 +13,7 @@ use crate::bridge;
 use crate::target::Target;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub async fn run(
     service: String,
@@ -18,6 +22,8 @@ pub async fn run(
     token: CancellationToken,
 ) {
     info!(service = %service, target = %target.describe(), "listening");
+
+    let mut connections: JoinSet<()> = JoinSet::new();
 
     loop {
         tokio::select! {
@@ -28,30 +34,33 @@ pub async fn run(
                         warn!(service = %service, error = %e, "accept failed");
                         tokio::select! {
                             _ = tokio::time::sleep(Duration::from_millis(100)) => {}
-                            _ = token.cancelled() => return,
+                            _ = token.cancelled() => break,
                         }
                         continue;
                     }
                 };
 
-                let target = Arc::clone(&target);
-                let service = service.clone();
-                let child = token.child_token();
-
-                tokio::spawn(async move {
-                    connect_and_bridge(&service, &*target, stream, peer, child).await;
-                });
+                connections.spawn(connect_and_bridge(
+                    service.clone(),
+                    Arc::clone(&target),
+                    stream,
+                    peer,
+                    token.child_token(),
+                ));
             }
-            _ = token.cancelled() => return,
+            _ = token.cancelled() => break,
         }
     }
+
+    // Drain: wait for all active connections to finish their bridge drain window.
+    while connections.join_next().await.is_some() {}
 }
 
 async fn connect_and_bridge(
-    service: &str,
-    target: &dyn Target,
+    service: String,
+    target: Arc<dyn Target>,
     stream: TcpStream,
-    peer: std::net::SocketAddr,
+    peer: SocketAddr,
     token: CancellationToken,
 ) {
     let mut backoff = Backoff::new();
@@ -74,13 +83,14 @@ async fn connect_and_bridge(
         warn!(service = %service, error = %err, "connect_attempt_failed");
         warn!(service = %service, delay_secs = delay.as_secs_f32(), "connect_retry_sleep");
 
+        let mut peek_buf = [0u8; 1];
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}
             _ = token.cancelled() => return,
-            _ = stream.readable() => {
-                let mut buf = [0u8; 1];
-                if matches!(stream.try_read(&mut buf), Ok(0)) {
-                    return; // client disconnected
+            // peek doesn't consume bytes — Ok(0) means the client closed the connection.
+            r = stream.peek(&mut peek_buf) => {
+                if matches!(r, Ok(0)) {
+                    return;
                 }
             }
         }
@@ -88,7 +98,21 @@ async fn connect_and_bridge(
 
     info!(service = %service, "bridge_started");
 
-    match bridge::run(stream, remote).await {
+    // Pin the bridge future so we can hand it to both the normal path and the
+    // drain path without moving it twice.
+    let mut bridge = pin!(bridge::run(stream, remote));
+
+    let result = tokio::select! {
+        r = bridge.as_mut() => r,
+        _ = token.cancelled() => {
+            // Shutdown fired — give the in-flight copy a deadline to flush.
+            tokio::time::timeout(DRAIN_TIMEOUT, bridge.as_mut())
+                .await
+                .unwrap_or(Ok(()))
+        }
+    };
+
+    match result {
         Ok(()) => info!(service = %service, "bridge_closed"),
         Err(e) => warn!(service = %service, error = %e, "bridge_closed"),
     }

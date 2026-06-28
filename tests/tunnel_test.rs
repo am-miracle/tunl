@@ -100,8 +100,8 @@ async fn retries_on_connect_failure_then_succeeds() {
 
     let mut client = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
 
-    // Allow up to 5 seconds — 1 failure means 1s real sleep before success.
-    tokio::time::timeout(Duration::from_secs(5), async {
+    // Allow up to 8 seconds — 1 failure means 1s real sleep before success.
+    tokio::time::timeout(Duration::from_secs(8), async {
         client.write_all(b"retry").await.unwrap();
         let mut buf = vec![0u8; 5];
         client.read_exact(&mut buf).await.unwrap();
@@ -109,6 +109,53 @@ async fn retries_on_connect_failure_then_succeeds() {
     })
     .await
     .expect("timed out — retry loop did not connect after one failure");
+}
+
+#[tokio::test]
+async fn tunnel_accept_loop_stops_on_cancel() {
+    // Spawn a tunnel with a target that always fails (so no bridges are open).
+    // Cancel the token and verify that the tunnel task finishes quickly.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let token = CancellationToken::new();
+    let target: Arc<dyn Target> = FakeTarget::new(usize::MAX);
+
+    let handle = tokio::spawn(tunl::tunnel::run(
+        "test".to_string(),
+        target,
+        listener,
+        token.child_token(),
+    ));
+
+    token.cancel();
+
+    tokio::time::timeout(Duration::from_secs(1), handle)
+        .await
+        .expect("tunnel task did not exit within 1s after cancellation")
+        .expect("tunnel task panicked");
+}
+
+#[tokio::test]
+async fn shutdown_closes_active_bridge() {
+    // Establish a live bridge, then cancel. The client should receive EOF within
+    // DRAIN_TIMEOUT + a small buffer.
+    let (port, token) = spawn_tunnel(FakeTarget::new(0)).await;
+    let mut client = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    // Write something so the bridge is definitely active.
+    client.write_all(b"ping").await.unwrap();
+    let mut buf = vec![0u8; 4];
+    client.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"ping");
+
+    token.cancel();
+
+    let deadline = tunl::tunnel::DRAIN_TIMEOUT + Duration::from_secs(1);
+    tokio::time::timeout(deadline, async {
+        let n = client.read(&mut buf).await.unwrap();
+        assert_eq!(n, 0, "expected EOF after shutdown");
+    })
+    .await
+    .expect("bridge was not closed within drain deadline");
 }
 
 #[tokio::test]

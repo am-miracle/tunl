@@ -1,22 +1,11 @@
-# Local test config — both active services are runnable today.
-
-# Proxies localhost:15432 -> your locally running Postgres on 127.0.0.1:5432.
-# Exercises the remote:// path end to end. (local_port is 15432, not 5432,
-# because your native Postgres already owns 5432.)
 [services.postgres]
 local_port = 15432
 target = "remote://127.0.0.1:5432"
 
-# Proxies localhost:9000 -> port 8000 inside the `tunl-demo` container.
-# Exercises the docker:// path. busybox ships `nc`, which the exec approach
-# requires. Start the container first:
-#   docker run -d --name tunl-demo busybox sh -c \
-#     'while true; do echo "hello from container" | nc -l -p 8000; done'
 [services.demo]
 local_port = 9000
 target = "docker://tunl-demo:8000"
 
-# --- kubectl:// targets land in Phase 8; kept here as reference ---
-# [services.api-gateway]
-# local_port = 3000
-# target = "kubectl://gateway/api-gw-pod:3000"
+[services.web]
+local_port = 8080
+target = "kubectl://default/web-0:8080"

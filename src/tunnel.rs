@@ -31,7 +31,7 @@ pub async fn run(
                 let (stream, peer) = match result {
                     Ok(pair) => pair,
                     Err(e) => {
-                        warn!(service = %service, error = %e, "accept failed");
+                        warn!(service = %service, error = %e, "accept_failed");
                         tokio::select! {
                             _ = tokio::time::sleep(Duration::from_millis(100)) => {}
                             _ = token.cancelled() => break,
@@ -80,8 +80,8 @@ async fn connect_and_bridge(
         };
 
         let delay = backoff.delay();
-        warn!(service = %service, error = %err, "connect_attempt_failed");
-        warn!(service = %service, delay_secs = delay.as_secs_f32(), "connect_retry_sleep");
+        warn!(service = %service, %peer, error = %err, "connect_attempt_failed");
+        warn!(service = %service, %peer, delay_secs = delay.as_secs_f32(), "connect_retry_sleep");
 
         let mut peek_buf = [0u8; 1];
         tokio::select! {
@@ -96,7 +96,7 @@ async fn connect_and_bridge(
         }
     };
 
-    info!(service = %service, "bridge_started");
+    info!(service = %service, %peer, "bridge_started");
 
     // Pin the bridge future so we can hand it to both the normal path and the
     // drain path without moving it twice.
@@ -112,7 +112,7 @@ async fn connect_and_bridge(
     };
 
     match result {
-        Ok(()) => info!(service = %service, "bridge_closed"),
-        Err(e) => warn!(service = %service, error = %e, "bridge_closed"),
+        Ok(()) => info!(service = %service, %peer, "bridge_closed"),
+        Err(e) => warn!(service = %service, %peer, error = %e, "bridge_closed"),
     }
 }

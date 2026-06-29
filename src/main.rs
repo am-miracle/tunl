@@ -20,12 +20,13 @@ async fn main() {
 }
 
 async fn run() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    // Parse args before init so the first log line already honors --json.
+    let args = parse_args()?;
+    init_tracing(args.json);
 
-    let config_path = parse_config_path()?;
-    let config = tunl::config::Config::load(&config_path)?;
+    let config = tunl::config::Config::load(&args.config)?;
 
-    info!(count = config.services.len(), "loaded services");
+    info!(count = config.services.len(), "loaded_services");
 
     let n = config.services.len();
 
@@ -74,18 +75,39 @@ async fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn parse_config_path() -> anyhow::Result<PathBuf> {
-    let mut args = std::env::args().skip(1);
+struct Args {
+    config: PathBuf,
+    json: bool,
+}
 
-    match args.next().as_deref() {
-        Some("--config") => {}
-        Some(unknown) => anyhow::bail!("unknown argument: {unknown}\nusage: tunl --config <path>"),
-        None => anyhow::bail!("usage: tunl --config <path>"),
+fn init_tracing(json: bool) {
+    if json {
+        tracing_subscriber::fmt().json().init();
+    } else {
+        tracing_subscriber::fmt::init();
+    }
+}
+
+const USAGE: &str = "usage: tunl --config <path> [--json]";
+
+fn parse_args() -> anyhow::Result<Args> {
+    let mut config = None;
+    let mut json = false;
+
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--json" => json = true,
+            "--config" => {
+                let path = args
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--config requires a path\n{USAGE}"))?;
+                config = Some(PathBuf::from(path));
+            }
+            other => anyhow::bail!("unknown argument: {other}\n{USAGE}"),
+        }
     }
 
-    let path = args
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("--config requires a path"))?;
-
-    Ok(PathBuf::from(path))
+    let config = config.ok_or_else(|| anyhow::anyhow!("--config is required\n{USAGE}"))?;
+    Ok(Args { config, json })
 }

@@ -20,21 +20,29 @@ pub fn from_uri(service: &str, uri: &str) -> Result<Box<dyn Target>> {
         let (namespace, pod_port) = rest.split_once('/').ok_or_else(|| Error::InvalidTarget {
             service: service.to_string(),
             target: uri.to_string(),
-            reason: "expected kubectl://<namespace>/<pod>:<port>".to_string(),
+            reason: "expected kubectl://<namespace>/<pod-or-selector>:<port>".to_string(),
         })?;
-        let (pod, port_str) = pod_port
-            .rsplit_once(':')
-            .ok_or_else(|| Error::InvalidTarget {
-                service: service.to_string(),
-                target: uri.to_string(),
-                reason: "expected kubectl://<namespace>/<pod>:<port>".to_string(),
-            })?;
+        let (selector, port_str) =
+            pod_port
+                .rsplit_once(':')
+                .ok_or_else(|| Error::InvalidTarget {
+                    service: service.to_string(),
+                    target: uri.to_string(),
+                    reason: "expected kubectl://<namespace>/<pod-or-selector>:<port>".to_string(),
+                })?;
         let port = parse_port(service, uri, port_str)?;
         require_nonempty(service, uri, "namespace", namespace)?;
-        require_nonempty(service, uri, "pod name", pod)?;
+        require_nonempty(service, uri, "pod name or label selector", selector)?;
+        // A selector containing '=' is a label query (app=api); otherwise it is
+        // a literal pod name. Pod names are DNS-1123 labels and never contain '='.
+        let selector = if selector.contains('=') {
+            kubectl::PodSelector::Labels(selector.to_string())
+        } else {
+            kubectl::PodSelector::Name(selector.to_string())
+        };
         Ok(Box::new(kubectl::KubectlTarget {
             namespace: namespace.to_string(),
-            pod: pod.to_string(),
+            selector,
             port,
         }))
     } else if let Some(rest) = uri.strip_prefix("docker://") {

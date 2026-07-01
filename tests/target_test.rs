@@ -25,6 +25,17 @@ fn kubectl_parses_and_describes_correctly() {
 }
 
 #[test]
+fn kubectl_label_selector_parses_and_describes() {
+    // A selector containing '=' is a label query and round-trips through describe.
+    let t = from_uri("api", "kubectl://default/app=api:8080").unwrap();
+    assert_eq!(t.describe(), "kubectl://default/app=api:8080");
+
+    // Multiple comma-separated labels are still one selector.
+    let t = from_uri("api", "kubectl://prod/app=api,tier=web:8080").unwrap();
+    assert_eq!(t.describe(), "kubectl://prod/app=api,tier=web:8080");
+}
+
+#[test]
 fn rejects_unknown_scheme() {
     let err = from_uri("x", "ftp://x:21").unwrap_err();
     assert_eq!(
@@ -69,7 +80,7 @@ fn rejects_kubectl_missing_namespace() {
     assert_eq!(
         err.to_string(),
         "[postgres] target \"kubectl://postgres-0:5432\" is malformed: \
-         expected kubectl://<namespace>/<pod>:<port>"
+         expected kubectl://<namespace>/<pod-or-selector>:<port>"
     );
 }
 

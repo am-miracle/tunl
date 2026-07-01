@@ -52,6 +52,9 @@ Three target types are supported:
 | `remote` | `remote://host:port` | a TCP host and port |
 | `docker` | `docker://container:port` | a port inside a running container |
 | `kubectl` | `kubectl://namespace/pod:port` | a port on a named pod |
+| `kubectl` | `kubectl://namespace/label=value:port` | a port on a pod matched by label |
+
+The `kubectl` target takes either an explicit pod name or a label selector. A selector is anything with an `=` in it, such as `app=api` or `app=api,tier=web`. Use a selector when the pod name is not stable, which is the case for Deployments.
 
 ## Run
 
@@ -81,7 +84,9 @@ tunl --config config.toml --json
 
 **docker** runs `nc` inside the container and streams its input and output over the Docker socket. This reaches the container's port without publishing it and works the same on macOS and Linux. The container image needs a `nc` (netcat) binary, so minimal images like `distroless` and `scratch` will not work.
 
-**kubectl** uses the Kubernetes API server's port-forward, the same path `kubectl port-forward` takes. It reads your current kubeconfig context. `tunl` forwards to an explicit pod name. If a pod is recreated under a new name, as a Deployment does on rollout, `tunl` keeps trying the configured name and logs that it cannot find it. Use StatefulSet pods, which keep stable names like `api-0`, or fall back to `kubectl port-forward` for Deployment routing.
+**kubectl** uses the Kubernetes API server's port-forward, the same path `kubectl port-forward` takes. It reads your current kubeconfig context.
+
+You can target a pod two ways. An explicit pod name (`kubectl://default/api-0:8080`) forwards to that exact pod. If it is recreated under a new name, as a Deployment does on rollout, `tunl` keeps trying the configured name and logs that it cannot find it. A label selector (`kubectl://default/app=api:8080`) resolves to a matching pod on every new connection and picks the first one that is ready, so it follows the current pod behind a Deployment. Use an explicit name for StatefulSet pods, which keep stable names like `api-0`, and a selector for Deployments.
 
 ## Reconnection
 
@@ -91,4 +96,4 @@ When a target is down, `tunl` retries with a backoff that grows from one second 
 
 - Local listeners bind to IPv4 loopback (`127.0.0.1`) only.
 - Docker targets need `nc` in the container image.
-- Kubernetes targets follow a fixed pod name, not a label or service.
+- A label selector picks the first ready pod, so it does not spread connections across replicas.

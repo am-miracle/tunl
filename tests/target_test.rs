@@ -36,6 +36,46 @@ fn kubectl_label_selector_parses_and_describes() {
 }
 
 #[test]
+fn kubectl_rejects_empty_selector() {
+    // Same require_nonempty guard as namespace/host/container — an empty
+    // segment is a parse error, not an empty-string pod name or selector.
+    let err = from_uri("api", "kubectl://default/:8080").unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "[api] target \"kubectl://default/:8080\" is malformed: \
+         pod name or label selector must not be empty"
+    );
+}
+
+#[test]
+fn kubectl_malformed_label_like_strings_still_classify_as_selectors() {
+    // from_uri only decides Name vs Labels on whether '=' is present. It does
+    // not validate label-selector grammar — that grammar is Kubernetes' own
+    // (it also supports `key`, `!key`, and `key in (a, b)` forms), so
+    // validating it here would just re-implement the API server's own check,
+    // incompletely. Anything containing '=' parses fine at this layer and any
+    // real syntax error surfaces from the Kubernetes API at connect time.
+    for selector in ["=", "=value", "key=", "app=api,", "a==b"] {
+        let uri = format!("kubectl://default/{selector}:8080");
+        let t = from_uri("api", &uri).unwrap_or_else(|e| panic!("{selector:?}: {e}"));
+        assert_eq!(t.describe(), format!("kubectl://default/{selector}:8080"));
+    }
+}
+
+#[test]
+fn kubectl_existence_selector_without_equals_is_a_known_limitation() {
+    // Kubernetes also supports existence selectors with no '=' at all, such as
+    // `tier` (has the label) or `!tier` (does not). tunl classifies purely on
+    // '=' presence, so a bare existence selector is indistinguishable from a
+    // pod name and is treated as one. Label selectors that assert a key/value
+    // pair (the common case) are unaffected. This is a documented v1
+    // limitation, not a bug: fixing it would need real cluster context to
+    // know whether a given string names a pod or a label.
+    let t = from_uri("api", "kubectl://default/tier:8080").unwrap();
+    assert_eq!(t.describe(), "kubectl://default/tier:8080");
+}
+
+#[test]
 fn rejects_unknown_scheme() {
     let err = from_uri("x", "ftp://x:21").unwrap_err();
     assert_eq!(

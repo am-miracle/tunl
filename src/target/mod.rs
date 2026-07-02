@@ -33,8 +33,9 @@ pub fn from_uri(service: &str, uri: &str) -> Result<Box<dyn Target>> {
         let port = parse_port(service, uri, port_str)?;
         require_nonempty(service, uri, "namespace", namespace)?;
         require_nonempty(service, uri, "pod name or label selector", selector)?;
-        // A selector containing '=' is a label query (app=api); otherwise it is
-        // a literal pod name. Pod names are DNS-1123 labels and never contain '='.
+        // '=' means a label query (app=api); otherwise it's a pod name, since
+        // pod names never contain '='. Existence selectors like `tier` (no
+        // '=') aren't supported and are treated as pod names instead.
         let selector = if selector.contains('=') {
             kubectl::PodSelector::Labels(selector.to_string())
         } else {

@@ -95,11 +95,34 @@ Resolve the selector to a current pod at connect time, and re-resolve on the nex
 
 **Goal.** Watch the config file. When it changes, start tunnels for new services and stop tunnels for removed ones, leaving untouched services running.
 
-**Where.** `src/main.rs` and `src/tunnel.rs`. The architecture already fits this: each service runs as its own task with its own cancellation token. Removing a service is cancelling its token. Adding one is spawning a task. You need a file watcher (the `notify` crate) and a diff of the service set.
+```toml
+# add a [services.cache] block and save. tunl brings up the new tunnel
+# without touching postgres or api, and without a restart.
+```
 
-**Done when.** Editing `config.toml` to add a service brings its port up without a restart, removing one frees its port, and a service whose definition did not change keeps its active connections.
+**Why this fits, and where it does not (read before starting).** Each service already runs as its own task with its own cancellation token, so the shutdown half of this is close to free: removing a service is cancelling its token, adding one is spawning a task, and `Service` already derives `PartialEq` so diffing old and new config is a plain `HashMap` comparison. But three things are missing today and need real design, not just wiring:
 
-**Size.** Medium. Decide and document what happens when an edit changes a service that has live connections (the reasonable choice is to drain and restart only that service).
+- **No name-to-task registry.** `main.rs` currently spawns everything into one anonymous `JoinSet` and blocks until Ctrl+C. To cancel or restart *one* service, `main.rs` needs a `HashMap<String, RunningService>` keyed by service name, and a loop that reacts to more than one event (Ctrl+C, a task exiting, a config change), not a single linear startup.
+- **Port re-bind race.** Cancelling a service's token stops its accept loop, but the bound `TcpListener` is not dropped until `tunnel::run` returns, which is after its drain window (up to `DRAIN_TIMEOUT`, plus any open bridges). If a reload removes a service and adds a different one on the same port, the new bind can race the old listener's teardown and fail with "address in use." Editing a service's target on the same port hits the same race, since that is a remove-then-add under the hood. This needs an explicit rule: wait for the old task to fully exit before binding the reused port, and accept that a rapid edit on a busy port takes a moment to settle rather than being instant.
+- **Reload must never apply a bad or partial config.** File watchers fire more than once per save (temp file plus rename, editors that write in chunks), so a raw `notify` event can catch a half-written file. A reload that fails to parse or fails validation must log and leave every running service untouched, not tear anything down. Validation also needs to check the new config against currently live and still-draining ports, not just for duplicates within itself.
+
+**Where.** `src/main.rs` (registry, event loop, applying a diff), a new pure module for the diff itself (see steps), `src/tunnel.rs` (no changes expected; it already returns cleanly on cancel).
+
+**Steps.**
+
+| # | Task | Notes |
+|---|------|-------|
+| 2.1 | Diff function | A pure function `diff(old: &HashMap<String, Service>, new: &HashMap<String, Service>) -> ReloadPlan` returning added, removed, and changed service names. No file I/O, no `notify`, unit-tested the way `Backoff` is: plain values in, plain values out. |
+| 2.2 | Service registry | Replace the flat `JoinSet` in `main.rs` with a `HashMap<String, RunningService>` (name, child token, join handle, bound port). Startup builds this map instead of a `Vec`. |
+| 2.3 | Apply a plan | Cancel tokens for removed and changed services and move their handles into a separate "retiring" pool rather than awaiting them inline. Bind and spawn added and changed services, waiting for a retiring handle on the same port to finish first. |
+| 2.4 | Watch and debounce | Wire `notify` to a channel, debounce bursts of events into one reload attempt, reject a config that fails to parse or validate and log why, and never apply a partial diff. |
+| 2.5 | Shutdown accounting | Ctrl+C must drain both the active registry and the retiring pool. `shutdown_complete` should not log until both are empty. |
+| 2.6 | Reload events | Log `config_reloaded`, and per service `service_added`, `service_removed`, `service_restarted`, matching the existing snake_case event style and carrying the `service` field. |
+| 2.7 | Tests | Unit tests on `diff` for every combination (added, removed, changed, unchanged, and unchanged-but-reordered map iteration). An integration test that calls the apply-plan step directly against a running set of fake services, the same way `tests/tunnel_test.rs` avoids real infrastructure. The `notify` glue itself stays thin and is verified by hand, the same way Docker and Kubernetes connect paths are. |
+
+**Done when.** Editing `config.toml` to add a service brings its port up without a restart. Removing one drains and frees its port. Changing a service's target drains and restarts only that service. A service whose definition did not change keeps its active connections through a reload of an unrelated service. A config edit that fails to parse or validate changes nothing.
+
+**Size.** Medium-large. The reload trigger is the easy part; the registry rework in `main.rs` and the port re-bind race are the real work, and both are correctness issues, not polish.
 
 ### 3. SSH target
 

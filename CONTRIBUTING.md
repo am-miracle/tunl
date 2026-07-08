@@ -63,7 +63,7 @@ Everything else (the accept loop, reconnection, shutdown) is written once agains
 
 ## Writing style for docs
 
-If your change touches the README, the blog, or any prose, keep the voice plain and natural. Do not use em dashes. Avoid filler words like "simply", "just", "seamlessly", and "powerful". Short and direct beats long and impressive.
+If your change touches the README, or any prose, keep the voice plain and natural. Do not use em dashes. Avoid filler words like "simply", "just", "seamlessly", and "powerful". Short and direct beats long and impressive.
 
 ## V2 roadmap
 

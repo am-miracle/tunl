@@ -78,6 +78,12 @@ Add `--json` for structured logs you can pipe into `jq` or a log collector:
 tunl --config config.toml --json
 ```
 
+## Editing the config while it runs
+
+`tunl` watches the config file and picks up changes without a restart. Add a service block and save, and its tunnel comes up on its own. Remove one and its port is freed. Change a service's target or port and only that service restarts, everything else keeps its connections.
+
+If a save leaves the file broken (invalid TOML, a bad target URI, a duplicate port), `tunl` logs why and leaves every running service exactly as it was. Nothing gets torn down over a typo.
+
 ## How each target works
 
 **remote** opens a plain TCP connection to the host and port. Use it for anything reachable over the network, including a bastion or an SSH tunnel you already have open.

@@ -10,6 +10,7 @@ bollard = "0.21.0"
 futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
 k8s-openapi = { version = "0.28.0", features = ["latest"] }
 kube = { version = "4.0.0", features = ["client", "ws", "rustls-tls"] }
+notify = "8.2.0"
 serde = { version = "1.0.228", features = ["derive"] }
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["full"] }

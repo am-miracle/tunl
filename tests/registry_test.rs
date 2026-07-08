@@ -1,0 +1,148 @@
+use std::net::TcpListener as StdTcpListener;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tunl::io::AsyncReadWrite;
+use tunl::registry::{ExitReason, Registry};
+use tunl::target::Target;
+
+// Registry::start takes a port as input rather than handing back whichever
+// one it bound, unlike a bare TcpListener, so tests can't just bind ":0" and
+// read the assigned port back afterward. Ask the OS for a free one up front
+// instead, then release it immediately so Registry can rebind it. Fixed
+// literal ports would flake if anything else on the machine happened to be
+// listening on one already.
+fn free_port() -> u16 {
+    let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().port()
+}
+
+// A target that always connects and echoes bytes back, so tests can prove a
+// registered service is genuinely serving traffic, not just bound.
+#[derive(Debug)]
+struct EchoTarget;
+
+#[async_trait]
+impl Target for EchoTarget {
+    async fn connect(&self) -> anyhow::Result<Box<dyn AsyncReadWrite>> {
+        let (local, remote) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            let (mut r, mut w) = tokio::io::split(local);
+            tokio::io::copy(&mut r, &mut w).await.ok();
+        });
+        Ok(Box::new(remote))
+    }
+
+    fn describe(&self) -> String {
+        "fake://echo".to_string()
+    }
+}
+
+fn echo() -> Arc<dyn Target> {
+    Arc::new(EchoTarget)
+}
+
+async fn round_trip(port: u16) {
+    let mut client = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    client.write_all(b"ping").await.unwrap();
+    let mut buf = [0u8; 4];
+    client.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"ping");
+}
+
+#[tokio::test]
+async fn start_serves_traffic_and_stop_drains_it() {
+    let port = free_port();
+    let mut registry = Registry::new();
+    registry
+        .start("svc".to_string(), port, echo())
+        .await
+        .unwrap();
+
+    round_trip(port).await;
+    assert_eq!(registry.task_count(), 1);
+
+    registry.stop("svc");
+    let (name, reason) = registry.join_next().await.unwrap();
+    assert_eq!(name, "svc");
+    assert_eq!(reason, ExitReason::Retired);
+    assert_eq!(registry.task_count(), 0);
+}
+
+#[tokio::test]
+async fn restarting_a_service_on_the_same_port_does_not_race_the_old_listener() {
+    // Regression test for the port re-bind race described in CONTRIBUTING:
+    // stopping a service does not free its port immediately (tunnel::run
+    // drains before returning), so starting a replacement on the same port
+    // must wait rather than fail with "address in use."
+    let port = free_port();
+    let mut registry = Registry::new();
+    registry
+        .start("old".to_string(), port, echo())
+        .await
+        .unwrap();
+    round_trip(port).await;
+
+    registry.stop("old");
+    // No sleep here on purpose: start() itself must wait for "old" to finish
+    // draining before it binds the same port for "new".
+    registry
+        .start("new".to_string(), port, echo())
+        .await
+        .unwrap();
+
+    round_trip(port).await;
+    assert_eq!(registry.task_count(), 1);
+}
+
+#[tokio::test]
+async fn independent_services_do_not_affect_each_other() {
+    let port_a = free_port();
+    let port_b = free_port();
+    let mut registry = Registry::new();
+    registry
+        .start("a".to_string(), port_a, echo())
+        .await
+        .unwrap();
+    registry
+        .start("b".to_string(), port_b, echo())
+        .await
+        .unwrap();
+
+    registry.stop("a");
+    let (name, reason) = registry.join_next().await.unwrap();
+    assert_eq!(name, "a");
+    assert_eq!(reason, ExitReason::Retired);
+
+    // "b" was never touched and is still serving traffic.
+    round_trip(port_b).await;
+    assert_eq!(registry.task_count(), 1);
+}
+
+#[tokio::test]
+async fn cancel_all_drains_every_service() {
+    let port_a = free_port();
+    let port_b = free_port();
+    let mut registry = Registry::new();
+    registry
+        .start("a".to_string(), port_a, echo())
+        .await
+        .unwrap();
+    registry
+        .start("b".to_string(), port_b, echo())
+        .await
+        .unwrap();
+
+    registry.cancel_all();
+
+    let mut seen = Vec::new();
+    while let Some((name, reason)) = registry.join_next().await {
+        assert_eq!(reason, ExitReason::Retired);
+        seen.push(name);
+    }
+    seen.sort();
+    assert_eq!(seen, vec!["a".to_string(), "b".to_string()]);
+    assert_eq!(registry.task_count(), 0);
+}

@@ -1,15 +1,22 @@
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Arc;
 use std::time::Duration;
 
+use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::net::TcpListener;
-use tokio::task::JoinSet;
-use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tokio::sync::mpsc;
+use tracing::{info, warn};
+use tunl::config::Service;
+use tunl::registry::{ExitReason, Registry};
+use tunl::target::Target;
 
 /// How long main waits for all tunnel tasks to drain before giving up.
 const SHUTDOWN_DRAIN: Duration = Duration::from_secs(10);
+/// How long to wait after a config file event before treating it as settled.
+/// Editors commonly fire more than one event per save (write, then rename).
+const RELOAD_DEBOUNCE: Duration = Duration::from_millis(300);
 
 #[tokio::main]
 async fn main() {
@@ -25,54 +32,148 @@ async fn run() -> anyhow::Result<()> {
     init_tracing(args.json);
 
     let config = tunl::config::Config::load(&args.config)?;
-
     info!(count = config.services.len(), "loaded_services");
 
-    let n = config.services.len();
+    let mut registry = Registry::new();
+    initial_start(&config.services, &mut registry).await?;
+    let mut current_services = config.services;
 
-    // parse all targets before touching any ports so a bad URI exits cleanly
-    let mut parsed = Vec::with_capacity(n);
-    for (name, service) in &config.services {
-        let target = tunl::target::from_uri(name, &service.target)?;
-        parsed.push((name.clone(), service.local_port as u16, target));
+    let (_watcher, mut reload_rx) = watch_config(&args.config)?;
+    let mut watcher_alive = true;
+
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => break,
+
+            event = reload_rx.recv(), if watcher_alive => {
+                match event {
+                    Some(()) => reload(&args.config, &mut current_services, &mut registry).await,
+                    None => watcher_alive = false, // watcher task ended; nothing more to watch
+                }
+            }
+
+            joined = registry.join_next(), if registry.task_count() > 0 => {
+                if let Some((name, ExitReason::Unexpected)) = joined {
+                    warn!(service = %name, "service_exited_unexpectedly");
+                }
+            }
+        }
     }
 
-    // pre-bind every port before spawning any tasks
-    // a bind failure here exits before any tunnel starts — no partial startup
-    let mut ready = Vec::with_capacity(n);
-    for (name, port, target) in parsed {
-        let listener = TcpListener::bind(("127.0.0.1", port))
-            .await
-            .map_err(|e| anyhow::anyhow!("[{name}] failed to bind port {port}: {e}"))?;
-        let target: Arc<dyn tunl::target::Target> = Arc::from(target);
-        ready.push((name, target, listener));
-    }
-
-    let token = CancellationToken::new();
-
-    let mut set: JoinSet<()> = JoinSet::new();
-    for (name, target, listener) in ready {
-        set.spawn(tunl::tunnel::run(
-            name,
-            target,
-            listener,
-            token.child_token(),
-        ));
-    }
-
-    tokio::signal::ctrl_c().await?;
     info!("shutdown_started");
-    token.cancel();
+    registry.cancel_all();
 
-    // Give all tunnel tasks (and their in-flight bridges) time to drain.
     tokio::time::timeout(SHUTDOWN_DRAIN, async {
-        while set.join_next().await.is_some() {}
+        while registry.join_next().await.is_some() {}
     })
     .await
     .ok();
 
     info!("shutdown_complete");
     Ok(())
+}
+
+/// Initial startup is all-or-nothing: no tunnel is spawned until every target
+/// parses and every local port binds.
+async fn initial_start(
+    services: &HashMap<String, Service>,
+    registry: &mut Registry,
+) -> anyhow::Result<()> {
+    let mut parsed = Vec::with_capacity(services.len());
+    for (name, service) in services {
+        let target = tunl::target::from_uri(name, &service.target)?;
+        parsed.push((name.clone(), service.local_port as u16, target));
+    }
+
+    let mut ready = Vec::with_capacity(parsed.len());
+    for (name, port, target) in parsed {
+        let listener = TcpListener::bind(("127.0.0.1", port))
+            .await
+            .map_err(|e| anyhow::anyhow!("[{name}] failed to bind port {port}: {e}"))?;
+        let target: Arc<dyn Target> = Arc::from(target);
+        ready.push((name, port, target, listener));
+    }
+
+    for (name, port, target, listener) in ready {
+        registry.adopt(name, port, target, listener);
+    }
+    Ok(())
+}
+
+async fn reload(
+    config_path: &Path,
+    current: &mut HashMap<String, Service>,
+    registry: &mut Registry,
+) {
+    let config = match tunl::config::Config::load(config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(error = %e, "config_reload_rejected");
+            return;
+        }
+    };
+
+    let plan = tunl::reload::apply(registry, current, config.services).await;
+    if plan.is_empty() {
+        return;
+    }
+
+    info!(
+        added = plan.added.len(),
+        removed = plan.removed.len(),
+        changed = plan.changed.len(),
+        "config_reloaded"
+    );
+}
+
+/// Watch the config file's parent directory (not the file itself: editors
+/// commonly save via a temp file plus rename, which can drop a watch on the
+/// original inode) and debounce bursts of events into a single tick per
+/// settled change.
+fn watch_config(
+    config_path: &Path,
+) -> anyhow::Result<(RecommendedWatcher, mpsc::UnboundedReceiver<()>)> {
+    let watch_dir = config_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let file_name = config_path.file_name().map(|n| n.to_owned());
+
+    let (raw_tx, mut raw_rx) = mpsc::unbounded_channel::<()>();
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
+        let Ok(event) = res else { return };
+        let matches = event
+            .paths
+            .iter()
+            .any(|p| p.file_name() == file_name.as_deref());
+        if matches {
+            let _ = raw_tx.send(());
+        }
+    })?;
+    watcher.watch(&watch_dir, RecursiveMode::NonRecursive)?;
+
+    let (debounced_tx, debounced_rx) = mpsc::unbounded_channel::<()>();
+    tokio::spawn(async move {
+        loop {
+            if raw_rx.recv().await.is_none() {
+                return;
+            }
+            // Coalesce any further events that arrive within the debounce
+            // window into this same reload attempt.
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(RELOAD_DEBOUNCE) => break,
+                    next = raw_rx.recv() => if next.is_none() { return },
+                }
+            }
+            if debounced_tx.send(()).is_err() {
+                return;
+            }
+        }
+    });
+
+    Ok((watcher, debounced_rx))
 }
 
 struct Args {

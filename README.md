@@ -103,3 +103,7 @@ When a target is down, `tunl` retries with a backoff that grows from one second 
 - Local listeners bind to IPv4 loopback (`127.0.0.1`) only.
 - Docker targets need `nc` in the container image.
 - A label selector picks the first ready pod, so it does not spread connections across replicas.
+
+## License
+
+`tunl` is available under the MIT License. See [LICENSE](LICENSE) for the full text.

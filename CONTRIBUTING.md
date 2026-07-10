@@ -26,7 +26,7 @@ The logic lives in a library and the binary is a thin shell on top, which is wha
 
 ```
 src/
-  main.rs          # arg parsing, startup, signal handling
+  main.rs          # arg parsing, startup, reload loop, signal handling
   lib.rs           # module declarations
   config.rs        # TOML config structs, loading, validation
   error.rs         # typed error enum (thiserror)
@@ -34,11 +34,14 @@ src/
   bridge.rs        # copies bytes between client and target
   backoff.rs       # exponential backoff policy
   tunnel.rs        # accept loop, retry loop, drain on shutdown
+  registry.rs      # running service tasks and per-service shutdown
+  reload.rs        # config diffing and reload application
   target/
     mod.rs         # Target trait + from_uri factory
     remote.rs      # remote:// target
     docker.rs      # docker:// target
     kubectl.rs     # kubectl:// target
+    ssh.rs         # ssh:// target
 tests/             # integration tests, one file per area
 ```
 
@@ -67,80 +70,11 @@ If your change touches the README, or any prose, keep the voice plain and natura
 
 ## V2 roadmap
 
-V1 ships static tunnels to three target types. V2 is about targets that follow what is actually running, and a few quality-of-life wins. Items are roughly ordered by value. Each one is self-contained, so you can take a single item without touching the others.
+V2 includes label-based Kubernetes targeting, hot config reload, and SSH bastion targets. The remaining items are roughly ordered by value. Each one is self-contained, so you can take a single item without touching the others.
 
 If you want to work on one, open an issue first so we can agree on the approach before you write code.
 
-### 1. Label-based Kubernetes targeting (flagship)
-
-**Problem.** V1 targets an explicit pod name, so Deployments do not work. When a Deployment rolls, the pod name changes and tunl keeps retrying a name that is gone.
-
-**Goal.** Support a label selector in place of a pod name:
-
-```toml
-target = "kubectl://default/app=api:8080"
-```
-
-Resolve the selector to a current pod at connect time, and re-resolve on the next connection rather than retrying a dead name. The existing pod-name form keeps working.
-
-**Where.** `src/target/mod.rs` (parse the selector form in `from_uri`), `src/target/kubectl.rs` (list pods by label, pick a ready one, then port-forward). The `kube` crate's `Api::list` with a label selector does the lookup.
-
-**Done when.** A label target connects to a running pod, and after that pod is replaced under a new name, a new client connection reaches the replacement without a restart. Document the pick rule (for example, first ready pod) and the parsing in the README.
-
-**Size.** Medium.
-
-### 2. Hot config reload
-
-**Problem.** Adding or removing a service means restarting the whole process and dropping every active tunnel.
-
-**Goal.** Watch the config file. When it changes, start tunnels for new services and stop tunnels for removed ones, leaving untouched services running.
-
-```toml
-# add a [services.cache] block and save. tunl brings up the new tunnel
-# without touching postgres or api, and without a restart.
-```
-
-**Why this fits, and where it does not (read before starting).** Each service already runs as its own task with its own cancellation token, so the shutdown half of this is close to free: removing a service is cancelling its token, adding one is spawning a task, and `Service` already derives `PartialEq` so diffing old and new config is a plain `HashMap` comparison. But three things are missing today and need real design, not just wiring:
-
-- **No name-to-task registry.** `main.rs` currently spawns everything into one anonymous `JoinSet` and blocks until Ctrl+C. To cancel or restart *one* service, `main.rs` needs a `HashMap<String, RunningService>` keyed by service name, and a loop that reacts to more than one event (Ctrl+C, a task exiting, a config change), not a single linear startup.
-- **Port re-bind race.** Cancelling a service's token stops its accept loop, but the bound `TcpListener` is not dropped until `tunnel::run` returns, which is after its drain window (up to `DRAIN_TIMEOUT`, plus any open bridges). If a reload removes a service and adds a different one on the same port, the new bind can race the old listener's teardown and fail with "address in use." Editing a service's target on the same port hits the same race, since that is a remove-then-add under the hood. This needs an explicit rule: wait for the old task to fully exit before binding the reused port, and accept that a rapid edit on a busy port takes a moment to settle rather than being instant.
-- **Reload must never apply a bad or partial config.** File watchers fire more than once per save (temp file plus rename, editors that write in chunks), so a raw `notify` event can catch a half-written file. A reload that fails to parse or fails validation must log and leave every running service untouched, not tear anything down. Validation also needs to check the new config against currently live and still-draining ports, not just for duplicates within itself.
-
-**Where.** `src/main.rs` (registry, event loop, applying a diff), a new pure module for the diff itself (see steps), `src/tunnel.rs` (no changes expected; it already returns cleanly on cancel).
-
-**Steps.**
-
-| # | Task | Notes |
-|---|------|-------|
-| 2.1 | Diff function | A pure function `diff(old: &HashMap<String, Service>, new: &HashMap<String, Service>) -> ReloadPlan` returning added, removed, and changed service names. No file I/O, no `notify`, unit-tested the way `Backoff` is: plain values in, plain values out. |
-| 2.2 | Service registry | Replace the flat `JoinSet` in `main.rs` with a `HashMap<String, RunningService>` (name, child token, join handle, bound port). Startup builds this map instead of a `Vec`. |
-| 2.3 | Apply a plan | Cancel tokens for removed and changed services and move their handles into a separate "retiring" pool rather than awaiting them inline. Bind and spawn added and changed services, waiting for a retiring handle on the same port to finish first. |
-| 2.4 | Watch and debounce | Wire `notify` to a channel, debounce bursts of events into one reload attempt, reject a config that fails to parse or validate and log why, and never apply a partial diff. |
-| 2.5 | Shutdown accounting | Ctrl+C must drain both the active registry and the retiring pool. `shutdown_complete` should not log until both are empty. |
-| 2.6 | Reload events | Log `config_reloaded`, and per service `service_added`, `service_removed`, `service_restarted`, matching the existing snake_case event style and carrying the `service` field. |
-| 2.7 | Tests | Unit tests on `diff` for every combination (added, removed, changed, unchanged, and unchanged-but-reordered map iteration). An integration test that calls the apply-plan step directly against a running set of fake services, the same way `tests/tunnel_test.rs` avoids real infrastructure. The `notify` glue itself stays thin and is verified by hand, the same way Docker and Kubernetes connect paths are. |
-
-**Done when.** Editing `config.toml` to add a service brings its port up without a restart. Removing one drains and frees its port. Changing a service's target drains and restarts only that service. A service whose definition did not change keeps its active connections through a reload of an unrelated service. A config edit that fails to parse or validate changes nothing.
-
-**Size.** Medium-large. The reload trigger is the easy part; the registry rework in `main.rs` and the port re-bind race are the real work, and both are correctness issues, not polish.
-
-### 3. SSH target
-
-**Goal.** Reach a service behind a bastion:
-
-```toml
-target = "ssh://user@host:22/db.internal:5432"
-```
-
-Open an SSH connection and forward to the inner host and port, then return that stream as an `AsyncReadWrite`. This is a new file under `src/target/` and one branch in `from_uri`, the same shape as the existing targets.
-
-**Where.** New `src/target/ssh.rs`. Look at an async SSH crate such as `russh`. The work here is auth and host-key handling, so think through how keys and known-hosts are resolved before writing the connect path.
-
-**Done when.** A service reachable only through a bastion is forwarded to a local port, with clear errors for auth failure and an unknown host key.
-
-**Size.** Medium to large, mostly because of auth.
-
-### 4. IPv6 and a bind address
+### 1. IPv6 and a bind address
 
 **Problem.** Local listeners bind to `127.0.0.1` only.
 
@@ -152,7 +86,7 @@ Open an SSH connection and forward to the inner host and port, then return that 
 
 **Size.** Small. Good first issue.
 
-### 5. Configurable timeouts and backoff
+### 2. Configurable timeouts and backoff
 
 **Problem.** The connect timeout (10s) and the backoff (1s growing to 15s) are hardcoded in `src/tunnel.rs` and `src/backoff.rs`.
 
@@ -164,7 +98,7 @@ Open an SSH connection and forward to the inner host and port, then return that 
 
 **Size.** Small. Good first issue.
 
-### 6. Docker and Kubernetes integration tests in CI
+### 3. Docker and Kubernetes integration tests in CI
 
 **Problem.** The Docker and Kubernetes paths are verified by hand. V2 adds label resolution and reload, which touch the riskiest code, so this is the moment to automate those checks.
 
@@ -176,7 +110,7 @@ Open an SSH connection and forward to the inner host and port, then return that 
 
 **Size.** Medium.
 
-### 7. Health dashboard
+### 4. Health dashboard
 
 **Problem.** There is no at-a-glance view of what is up. To see tunnel state you read the logs.
 
@@ -188,7 +122,7 @@ Open an SSH connection and forward to the inner host and port, then return that 
 
 **Size.** Large, mostly because of the state-reporting plumbing rather than the UI itself.
 
-### 8. `tunl init`
+### 5. `tunl init`
 
 **Problem.** Writing the first config by hand means looking up pod names, container names, and ports before you can start.
 

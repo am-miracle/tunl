@@ -36,6 +36,80 @@ fn kubectl_label_selector_parses_and_describes() {
 }
 
 #[test]
+fn ssh_parses_and_describes_with_default_bastion_port() {
+    let target = from_uri("db", "ssh://deploy@bastion.example.com/db.internal:5432").unwrap();
+
+    assert_eq!(
+        target.describe(),
+        "ssh://deploy@bastion.example.com:22/db.internal:5432"
+    );
+}
+
+#[test]
+fn ssh_rejects_passwords_in_the_uri() {
+    let err = from_uri(
+        "db",
+        "ssh://deploy:secret@bastion.example.com/db.internal:5432",
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "[db] target \"ssh://deploy:secret@bastion.example.com/db.internal:5432\" is malformed: \
+         passwords are not allowed in SSH target URIs"
+    );
+}
+
+#[test]
+fn ssh_supports_explicit_ports_and_ipv6_hosts() {
+    let target = from_uri("db", "ssh://deploy@[2001:db8::10]:2222/[2001:db8::20]:5432").unwrap();
+
+    assert_eq!(
+        target.describe(),
+        "ssh://deploy@[2001:db8::10]:2222/[2001:db8::20]:5432"
+    );
+}
+
+#[test]
+fn ssh_identity_fingerprint_parses_and_describes() {
+    let fingerprint = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let uri = format!("ssh://deploy@bastion.example.com/db.internal:5432?identity={fingerprint}");
+
+    let target = from_uri("db", &uri).unwrap();
+
+    assert_eq!(
+        target.describe(),
+        format!("ssh://deploy@bastion.example.com:22/db.internal:5432?identity={fingerprint}")
+    );
+}
+
+#[test]
+fn ssh_rejects_invalid_identity_queries() {
+    for query in [
+        "identity=",
+        "identity=not-a-fingerprint",
+        "other=value",
+        "identity=SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&other=value",
+    ] {
+        let uri = format!("ssh://deploy@bastion.example.com/db.internal:5432?{query}");
+        assert!(from_uri("db", &uri).is_err(), "accepted invalid URI {uri}");
+    }
+}
+
+#[test]
+fn ssh_rejects_missing_connection_fields() {
+    for uri in [
+        "ssh://bastion.example.com/db.internal:5432",
+        "ssh://deploy@bastion.example.com",
+        "ssh://deploy@bastion.example.com/db.internal",
+        "ssh://deploy@bastion.example.com:0/db.internal:5432",
+        "ssh://deploy@bastion.example.com/db.internal:70000",
+    ] {
+        assert!(from_uri("db", uri).is_err(), "accepted malformed URI {uri}");
+    }
+}
+
+#[test]
 fn kubectl_rejects_empty_selector() {
     // Same require_nonempty guard as namespace/host/container — an empty
     // segment is a parse error, not an empty-string pod name or selector.
@@ -80,8 +154,8 @@ fn rejects_unknown_scheme() {
     let err = from_uri("x", "ftp://x:21").unwrap_err();
     assert_eq!(
         err.to_string(),
-        "[x] target \"ftp://x:21\" has an unrecognized scheme \
-         — expected kubectl://, docker://, or remote://"
+        "[x] target \"ftp://x:21\" has an unrecognized scheme: \
+         expected kubectl://, docker://, remote://, or ssh://"
     );
 }
 

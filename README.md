@@ -40,12 +40,16 @@ target = "docker://redis:6379"
 [services.api]
 local_port = 8080
 target = "kubectl://default/api-0:8080"
+
+[services.internal_db]
+local_port = 25432
+target = "ssh://deploy@bastion.example.com/db.internal:5432"
 ```
 
 - `local_port` is the port on your machine (`127.0.0.1`) that `tunl` listens on.
 - `target` is where that traffic goes, written as a URI.
 
-Three target types are supported:
+Four target types are supported:
 
 | Scheme | Format | Forwards to |
 |--------|--------|-------------|
@@ -53,6 +57,7 @@ Three target types are supported:
 | `docker` | `docker://container:port` | a port inside a running container |
 | `kubectl` | `kubectl://namespace/pod:port` | a port on a named pod |
 | `kubectl` | `kubectl://namespace/label=value:port` | a port on a pod matched by label |
+| `ssh` | `ssh://user@bastion[:port]/host:port[?identity=fingerprint]` | a host reachable through an SSH bastion |
 
 The `kubectl` target takes either an explicit pod name or a label selector. A selector is anything with an `=` in it, such as `app=api` or `app=api,tier=web`. Use a selector when the pod name is not stable, which is the case for Deployments.
 
@@ -94,6 +99,10 @@ If a save leaves the file broken (invalid TOML, a bad target URI, a duplicate po
 
 You can target a pod two ways. An explicit pod name (`kubectl://default/api-0:8080`) forwards to that exact pod. If it is recreated under a new name, as a Deployment does on rollout, `tunl` keeps trying the configured name and logs that it cannot find it. A label selector (`kubectl://default/app=api:8080`) resolves to a matching pod on every new connection and picks the first one that is ready, so it follows the current pod behind a Deployment. Use an explicit name for StatefulSet pods, which keep stable names like `api-0`, and a selector for Deployments.
 
+**ssh** connects to a bastion and opens a direct TCP channel to the destination. Connections for the same service share one authenticated SSH transport, which is recreated if it closes. The bastion port defaults to `22`. Each host key must already be trusted in `~/.ssh/known_hosts`. Authentication tries identities from `ssh-agent`, then unencrypted `~/.ssh/id_ed25519`, `id_ecdsa`, and `id_rsa` files. Add encrypted keys to `ssh-agent`; passwords are not accepted in target URIs.
+
+If your agent contains several keys, append `?identity=<fingerprint>` to select one public key. Use `ssh-add -l -E sha256` to list fingerprints. When a fingerprint is configured, tunl offers only that agent identity or a matching default identity file to the bastion.
+
 ## Reconnection
 
 When a target is down, `tunl` retries with a backoff that grows from one second up to fifteen, then connects as soon as the target is back. The retry covers connection setup. An open connection that drops is closed, and the next client connection sets up a fresh tunnel. Restart a pod or a container and the next request goes through once it is ready.
@@ -103,6 +112,7 @@ When a target is down, `tunl` retries with a backoff that grows from one second 
 - Local listeners bind to IPv4 loopback (`127.0.0.1`) only.
 - Docker targets need `nc` in the container image.
 - A label selector picks the first ready pod, so it does not spread connections across replicas.
+- SSH targets do not read aliases, identity paths, or proxy rules from `~/.ssh/config`.
 
 ## License
 

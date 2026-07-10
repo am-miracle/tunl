@@ -36,7 +36,7 @@ pub enum Error {
     // {target:?} instead of {target} so the value gets wrapped in quotes,
     // making it clear where the URI starts and ends in the message.
     #[error(
-        "[{service}] target {target:?} has an unrecognized scheme — expected kubectl://, docker://, or remote://"
+        "[{service}] target {target:?} has an unrecognized scheme: expected kubectl://, docker://, remote://, or ssh://"
     )]
     UnknownScheme { service: String, target: String },
 

@@ -33,6 +33,7 @@ src/
   io.rs            # AsyncReadWrite trait
   bridge.rs        # copies bytes between client and target
   backoff.rs       # exponential backoff policy
+  listener.rs      # IPv4, IPv6, and dual-stack listener binding
   tunnel.rs        # accept loop, retry loop, drain on shutdown
   registry.rs      # running service tasks and per-service shutdown
   reload.rs        # config diffing and reload application
@@ -74,19 +75,7 @@ V2 includes label-based Kubernetes targeting, hot config reload, and SSH bastion
 
 If you want to work on one, open an issue first so we can agree on the approach before you write code.
 
-### 1. IPv6 and a bind address
-
-**Problem.** Local listeners bind to `127.0.0.1` only.
-
-**Goal.** Let a service or a global flag choose the bind address, so `::1` or dual-stack works.
-
-**Where.** `src/config.rs` (a `bind_address` field with a sensible default) and `src/main.rs` (use it in `TcpListener::bind`).
-
-**Done when.** A configured bind address is honored and the default stays `127.0.0.1`.
-
-**Size.** Small. Good first issue.
-
-### 2. Configurable timeouts and backoff
+### 1. Configurable timeouts and backoff
 
 **Problem.** The connect timeout (10s) and the backoff (1s growing to 15s) are hardcoded in `src/tunnel.rs` and `src/backoff.rs`.
 
@@ -98,7 +87,7 @@ If you want to work on one, open an issue first so we can agree on the approach 
 
 **Size.** Small. Good first issue.
 
-### 3. Docker and Kubernetes integration tests in CI
+### 2. Docker and Kubernetes integration tests in CI
 
 **Problem.** The Docker and Kubernetes paths are verified by hand. V2 adds label resolution and reload, which touch the riskiest code, so this is the moment to automate those checks.
 
@@ -110,7 +99,7 @@ If you want to work on one, open an issue first so we can agree on the approach 
 
 **Size.** Medium.
 
-### 4. Health dashboard
+### 3. Health dashboard
 
 **Problem.** There is no at-a-glance view of what is up. To see tunnel state you read the logs.
 
@@ -122,7 +111,7 @@ If you want to work on one, open an issue first so we can agree on the approach 
 
 **Size.** Large, mostly because of the state-reporting plumbing rather than the UI itself.
 
-### 5. `tunl init`
+### 4. `tunl init`
 
 **Problem.** Writing the first config by hand means looking up pod names, container names, and ports before you can start.
 
@@ -137,3 +126,15 @@ tunl init --namespace default > config.toml
 **Done when.** `tunl init` against a namespace produces a valid config that loads without edits, with a sensible local port per discovered service.
 
 **Size.** Medium.
+
+### 5. Authenticated listeners
+
+**Problem.** A service bound to a non-loopback address accepts any client that can reach its port. The `allow_remote_connections` setting acknowledges that exposure but does not protect the listener.
+
+**Goal.** Authenticate incoming clients before forwarding traffic. Support TLS with client certificates or integration with an authenticated proxy without weakening the current loopback default.
+
+**Where.** A new listener authentication layer between `src/listener.rs` and `src/tunnel.rs`, plus certificate and trust configuration in `src/config.rs`.
+
+**Done when.** A protected listener rejects clients without a trusted identity, accepts configured clients, and reloads certificate configuration without restarting unrelated services.
+
+**Size.** Large. Authentication, certificate lifecycle, and proxy trust boundaries need a design before implementation.

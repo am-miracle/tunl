@@ -4,8 +4,11 @@ target = "remote://127.0.0.1:5432"
 
 [services.demo]
 local_port = 9000
+bind_address = "::1"
 target = "docker://tunl-demo:8000"
 
 [services.web]
 local_port = 8080
+bind_address = "::"
+allow_remote_connections = true
 target = "kubectl://default/web-0:8080"

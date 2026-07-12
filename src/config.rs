@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
 
 use serde::Deserialize;
@@ -8,7 +9,15 @@ use crate::error::{Error, Result};
 #[derive(Debug, PartialEq, Deserialize)]
 pub struct Service {
     pub local_port: i64,
+    #[serde(default = "default_bind_address")]
+    pub bind_address: IpAddr,
+    #[serde(default)]
+    pub allow_remote_connections: bool,
     pub target: String,
+}
+
+fn default_bind_address() -> IpAddr {
+    IpAddr::V4(Ipv4Addr::LOCALHOST)
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -42,6 +51,12 @@ impl Config {
 
         for (name, service) in &self.services {
             validate_port(name, service.local_port)?;
+            if !service.bind_address.is_loopback() && !service.allow_remote_connections {
+                return Err(Error::RemoteBindingNotAllowed {
+                    service: name.clone(),
+                    address: service.bind_address,
+                });
+            }
         }
 
         check_duplicate_ports(&self.services)?;

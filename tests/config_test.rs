@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use tempfile::NamedTempFile;
 use tunl::config::Config;
@@ -33,11 +34,83 @@ fn valid_config_parses_into_expected_structs() {
 
     let postgres = &config.services["postgres"];
     assert_eq!(postgres.local_port, 5432);
+    assert_eq!(postgres.bind_address, IpAddr::V4(Ipv4Addr::LOCALHOST));
+    assert!(!postgres.allow_remote_connections);
     assert_eq!(postgres.target, "kubectl://default/postgres-0:5432");
 
     let redis = &config.services["redis"];
     assert_eq!(redis.local_port, 6379);
     assert_eq!(redis.target, "docker://redis:6379");
+}
+
+#[test]
+fn accepts_ipv6_loopback_without_remote_opt_in() {
+    let file = write_config(
+        r#"
+        [services.api]
+        local_port = 8080
+        bind_address = "::1"
+        target = "remote://api.internal:8080"
+        "#,
+    );
+
+    let config = Config::load(file.path()).expect("IPv6 loopback should load");
+    assert_eq!(
+        config.services["api"].bind_address,
+        IpAddr::V6(Ipv6Addr::LOCALHOST)
+    );
+}
+
+#[test]
+fn rejects_remote_bind_without_explicit_opt_in() {
+    let file = write_config(
+        r#"
+        [services.api]
+        local_port = 8080
+        bind_address = "::"
+        target = "remote://api.internal:8080"
+        "#,
+    );
+
+    let err = Config::load(file.path()).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "[api] bind_address :: accepts remote connections; set allow_remote_connections = true to permit network exposure"
+    );
+}
+
+#[test]
+fn accepts_remote_bind_with_explicit_opt_in() {
+    let file = write_config(
+        r#"
+        [services.api]
+        local_port = 8080
+        bind_address = "0.0.0.0"
+        allow_remote_connections = true
+        target = "remote://api.internal:8080"
+        "#,
+    );
+
+    let config = Config::load(file.path()).expect("explicit remote bind should load");
+    assert!(config.services["api"].allow_remote_connections);
+}
+
+#[test]
+fn rejects_malformed_bind_address() {
+    let file = write_config(
+        r#"
+        [services.api]
+        local_port = 8080
+        bind_address = "localhost"
+        target = "remote://api.internal:8080"
+        "#,
+    );
+
+    let err = Config::load(file.path()).unwrap_err();
+    assert!(
+        err.to_string().starts_with("failed to parse config file"),
+        "unexpected error message: {err}"
+    );
 }
 
 #[test]

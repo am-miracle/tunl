@@ -3,6 +3,7 @@ pub mod bridge;
 pub mod config;
 pub mod error;
 pub mod io;
+pub mod listener;
 pub mod registry;
 pub mod reload;
 pub mod target;

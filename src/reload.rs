@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tracing::{info, warn};
@@ -128,14 +129,17 @@ async fn start_one(
         }
     };
 
-    let port = service.local_port as u16;
-    match registry.start(name.to_string(), port, target).await {
+    let address = SocketAddr::new(service.bind_address, service.local_port as u16);
+    if !service.bind_address.is_loopback() {
+        warn!(service = %name, %address, "remote_listener_enabled");
+    }
+    match registry.start(name.to_string(), address, target).await {
         Ok(()) if is_restart => {
-            info!(service = %name, port, "service_restarted");
+            info!(service = %name, %address, "service_restarted");
             true
         }
         Ok(()) => {
-            info!(service = %name, port, "service_added");
+            info!(service = %name, %address, "service_added");
             true
         }
         Err(e) => {
@@ -152,6 +156,8 @@ mod tests {
     fn svc(port: i64, target: &str) -> Service {
         Service {
             local_port: port,
+            bind_address: "127.0.0.1".parse().unwrap(),
+            allow_remote_connections: false,
             target: target.to_string(),
         }
     }
@@ -206,6 +212,19 @@ mod tests {
         assert_eq!(plan.changed, vec!["api".to_string()]);
         assert!(plan.added.is_empty());
         assert!(plan.removed.is_empty());
+    }
+
+    #[test]
+    fn detects_bind_address_change() {
+        let mut old = HashMap::new();
+        old.insert("api".to_string(), svc(8080, "remote://api.internal:8080"));
+
+        let mut changed = svc(8080, "remote://api.internal:8080");
+        changed.bind_address = "::1".parse().unwrap();
+        let mut new = HashMap::new();
+        new.insert("api".to_string(), changed);
+
+        assert_eq!(diff(&old, &new).changed, vec!["api".to_string()]);
     }
 
     #[test]
@@ -304,7 +323,12 @@ mod tests {
             .unwrap();
         let target: Arc<dyn Target> =
             Arc::from(crate::target::from_uri("echo", "remote://127.0.0.1:1").unwrap());
-        registry.adopt("echo".to_string(), old_port, target, listener);
+        registry.adopt(
+            "echo".to_string(),
+            SocketAddr::from(([127, 0, 0, 1], old_port)),
+            target,
+            listener,
+        );
 
         let mut current = HashMap::new();
         current.insert(
@@ -357,14 +381,24 @@ mod tests {
             .unwrap();
         let target_a: Arc<dyn Target> =
             Arc::from(crate::target::from_uri("svc-a", "remote://127.0.0.1:1").unwrap());
-        registry.adopt("svc-a".to_string(), port_a, target_a, listener_a);
+        registry.adopt(
+            "svc-a".to_string(),
+            SocketAddr::from(([127, 0, 0, 1], port_a)),
+            target_a,
+            listener_a,
+        );
 
         let listener_b = tokio::net::TcpListener::bind(("127.0.0.1", port_b))
             .await
             .unwrap();
         let target_b: Arc<dyn Target> =
             Arc::from(crate::target::from_uri("svc-b", "remote://127.0.0.1:1").unwrap());
-        registry.adopt("svc-b".to_string(), port_b, target_b, listener_b);
+        registry.adopt(
+            "svc-b".to_string(),
+            SocketAddr::from(([127, 0, 0, 1], port_b)),
+            target_b,
+            listener_b,
+        );
 
         let mut current = HashMap::new();
         current.insert(

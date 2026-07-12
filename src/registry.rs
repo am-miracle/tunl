@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tokio::net::TcpListener;
@@ -17,7 +18,7 @@ pub enum ExitReason {
 
 struct ActiveEntry {
     token: CancellationToken,
-    port: u16,
+    address: SocketAddr,
 }
 
 /// Tracks running tunnel tasks by service name so one service can be
@@ -31,7 +32,7 @@ struct ActiveEntry {
 pub struct Registry {
     root: CancellationToken,
     active: HashMap<String, ActiveEntry>,
-    retiring: HashMap<String, u16>,
+    retiring: HashMap<String, SocketAddr>,
     tasks: JoinSet<String>,
 }
 
@@ -52,7 +53,7 @@ impl Registry {
     pub fn adopt(
         &mut self,
         name: String,
-        port: u16,
+        address: SocketAddr,
         target: Arc<dyn Target>,
         listener: TcpListener,
     ) {
@@ -65,25 +66,25 @@ impl Registry {
             run_name
         });
 
-        self.active.insert(name, ActiveEntry { token, port });
+        self.active.insert(name, ActiveEntry { token, address });
     }
 
-    /// Bind `port` and adopt the result. If a just-stopped service is still
+    /// Bind `address` and adopt the result. If a just-stopped service is still
     /// draining on the same port, wait for it to finish first rather than
     /// racing its listener's teardown.
     pub async fn start(
         &mut self,
         name: String,
-        port: u16,
+        address: SocketAddr,
         target: Arc<dyn Target>,
     ) -> anyhow::Result<()> {
-        self.await_port_free(port).await;
+        self.await_port_free(address.port()).await;
 
-        let listener = TcpListener::bind(("127.0.0.1", port))
+        let listener = crate::listener::bind(address)
             .await
-            .map_err(|e| anyhow::anyhow!("[{name}] failed to bind port {port}: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("[{name}] failed to bind {address}: {e}"))?;
 
-        self.adopt(name, port, target, listener);
+        self.adopt(name, address, target, listener);
         Ok(())
     }
 
@@ -92,7 +93,7 @@ impl Registry {
             return false;
         };
         entry.token.cancel();
-        self.retiring.insert(name.to_string(), entry.port);
+        self.retiring.insert(name.to_string(), entry.address);
         true
     }
 
@@ -101,7 +102,7 @@ impl Registry {
     pub fn cancel_all(&mut self) {
         self.root.cancel();
         for (name, entry) in self.active.drain() {
-            self.retiring.insert(name, entry.port);
+            self.retiring.insert(name, entry.address);
         }
     }
 
@@ -132,7 +133,7 @@ impl Registry {
     }
 
     async fn await_port_free(&mut self, port: u16) {
-        while self.retiring.values().any(|&p| p == port) {
+        while self.retiring.values().any(|address| address.port() == port) {
             if self.join_next().await.is_none() {
                 break;
             }

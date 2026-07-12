@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::net::TcpListener as StdTcpListener;
 use std::sync::Arc;
 
@@ -44,6 +45,10 @@ fn echo() -> Arc<dyn Target> {
     Arc::new(EchoTarget)
 }
 
+fn localhost(port: u16) -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], port))
+}
+
 async fn round_trip(port: u16) {
     let mut client = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
     client.write_all(b"ping").await.unwrap();
@@ -57,7 +62,7 @@ async fn start_serves_traffic_and_stop_drains_it() {
     let port = free_port();
     let mut registry = Registry::new();
     registry
-        .start("svc".to_string(), port, echo())
+        .start("svc".to_string(), localhost(port), echo())
         .await
         .unwrap();
 
@@ -80,7 +85,7 @@ async fn restarting_a_service_on_the_same_port_does_not_race_the_old_listener() 
     let port = free_port();
     let mut registry = Registry::new();
     registry
-        .start("old".to_string(), port, echo())
+        .start("old".to_string(), localhost(port), echo())
         .await
         .unwrap();
     round_trip(port).await;
@@ -89,7 +94,7 @@ async fn restarting_a_service_on_the_same_port_does_not_race_the_old_listener() 
     // No sleep here on purpose: start() itself must wait for "old" to finish
     // draining before it binds the same port for "new".
     registry
-        .start("new".to_string(), port, echo())
+        .start("new".to_string(), localhost(port), echo())
         .await
         .unwrap();
 
@@ -103,11 +108,11 @@ async fn independent_services_do_not_affect_each_other() {
     let port_b = free_port();
     let mut registry = Registry::new();
     registry
-        .start("a".to_string(), port_a, echo())
+        .start("a".to_string(), localhost(port_a), echo())
         .await
         .unwrap();
     registry
-        .start("b".to_string(), port_b, echo())
+        .start("b".to_string(), localhost(port_b), echo())
         .await
         .unwrap();
 
@@ -127,11 +132,11 @@ async fn cancel_all_drains_every_service() {
     let port_b = free_port();
     let mut registry = Registry::new();
     registry
-        .start("a".to_string(), port_a, echo())
+        .start("a".to_string(), localhost(port_a), echo())
         .await
         .unwrap();
     registry
-        .start("b".to_string(), port_b, echo())
+        .start("b".to_string(), localhost(port_b), echo())
         .await
         .unwrap();
 

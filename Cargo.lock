@@ -3062,6 +3062,7 @@ dependencies = [
  "rand 0.10.2",
  "russh",
  "serde",
+ "socket2",
  "tempfile",
  "thiserror",
  "tokio",

@@ -1,11 +1,11 @@
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Arc;
 use std::time::Duration;
 
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
-use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 use tunl::config::Service;
@@ -82,20 +82,24 @@ async fn initial_start(
     let mut parsed = Vec::with_capacity(services.len());
     for (name, service) in services {
         let target = tunl::target::from_uri(name, &service.target)?;
-        parsed.push((name.clone(), service.local_port as u16, target));
+        let address = SocketAddr::new(service.bind_address, service.local_port as u16);
+        if !service.bind_address.is_loopback() {
+            warn!(service = %name, %address, "remote_listener_enabled");
+        }
+        parsed.push((name.clone(), address, target));
     }
 
     let mut ready = Vec::with_capacity(parsed.len());
-    for (name, port, target) in parsed {
-        let listener = TcpListener::bind(("127.0.0.1", port))
+    for (name, address, target) in parsed {
+        let listener = tunl::listener::bind(address)
             .await
-            .map_err(|e| anyhow::anyhow!("[{name}] failed to bind port {port}: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("[{name}] failed to bind {address}: {e}"))?;
         let target: Arc<dyn Target> = Arc::from(target);
-        ready.push((name, port, target, listener));
+        ready.push((name, address, target, listener));
     }
 
-    for (name, port, target, listener) in ready {
-        registry.adopt(name, port, target, listener);
+    for (name, address, target, listener) in ready {
+        registry.adopt(name, address, target, listener);
     }
     Ok(())
 }

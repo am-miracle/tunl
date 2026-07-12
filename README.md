@@ -39,6 +39,7 @@ target = "docker://redis:6379"
 
 [services.api]
 local_port = 8080
+bind_address = "::1"
 target = "kubectl://default/api-0:8080"
 
 [services.internal_db]
@@ -46,8 +47,21 @@ local_port = 25432
 target = "ssh://deploy@bastion.example.com/db.internal:5432"
 ```
 
-- `local_port` is the port on your machine (`127.0.0.1`) that `tunl` listens on.
+- `local_port` is the port on your machine that `tunl` listens on.
+- `bind_address` is optional and defaults to `127.0.0.1`. Use `::1` for IPv6 loopback.
 - `target` is where that traffic goes, written as a URI.
+
+`0.0.0.0`, `::`, and other non-loopback addresses can expose a tunnel to other machines. Tunl rejects these addresses unless the service acknowledges the exposure:
+
+```toml
+[services.shared_api]
+local_port = 8080
+bind_address = "::"
+allow_remote_connections = true
+target = "remote://api.internal:8080"
+```
+
+`::` creates one dual-stack listener that accepts IPv4 and IPv6 connections. The opt-in does not authenticate incoming clients. Use firewall rules to restrict access.
 
 Four target types are supported:
 
@@ -109,7 +123,7 @@ When a target is down, `tunl` retries with a backoff that grows from one second 
 
 ## Limitations
 
-- Local listeners bind to IPv4 loopback (`127.0.0.1`) only.
+- Non-loopback listeners do not authenticate incoming clients.
 - Docker targets need `nc` in the container image.
 - A label selector picks the first ready pod, so it does not spread connections across replicas.
 - SSH targets do not read aliases, identity paths, or proxy rules from `~/.ssh/config`.

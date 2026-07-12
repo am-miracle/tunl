@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
@@ -32,6 +33,11 @@ pub enum Error {
         first: String,
         second: String,
     },
+
+    #[error(
+        "[{service}] bind_address {address} accepts remote connections; set allow_remote_connections = true to permit network exposure"
+    )]
+    RemoteBindingNotAllowed { service: String, address: IpAddr },
 
     // {target:?} instead of {target} so the value gets wrapped in quotes,
     // making it clear where the URI starts and ends in the message.

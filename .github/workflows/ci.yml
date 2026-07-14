@@ -25,3 +25,50 @@ jobs:
         run: cargo build --all-targets
       - name: test
         run: cargo test
+
+  real-backends:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TUNL_REAL_BACKENDS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: tunl-test
+          wait: 120s
+      - name: start Docker demo backend
+        run: |
+          docker rm -f tunl-demo >/dev/null 2>&1 || true
+          docker run -d --name tunl-demo busybox \
+            sh -c 'while true; do echo "hello from container" | nc -l -p 8000; done'
+      - name: start Kubernetes demo backend
+        run: |
+          kubectl config use-context kind-tunl-test
+          kubectl apply -f - <<'YAML'
+          apiVersion: apps/v1
+          kind: StatefulSet
+          metadata: { name: web }
+          spec:
+            serviceName: web
+            replicas: 1
+            selector: { matchLabels: { app: web } }
+            template:
+              metadata: { labels: { app: web } }
+              spec:
+                containers:
+                  - name: web
+                    image: hashicorp/http-echo
+                    args: ["-text=hello from web-0", "-listen=:8080"]
+                    ports: [{ containerPort: 8080 }]
+          YAML
+          kubectl wait --for=condition=ready pod/web-0 --timeout=120s
+      - name: test real Docker and Kubernetes backends
+        run: cargo test --test real_backend_integration_test -- --nocapture
+      - name: clean up real backends
+        if: always()
+        run: |
+          docker rm -f tunl-demo >/dev/null 2>&1 || true
+          kind delete cluster --name tunl-test >/dev/null 2>&1 || true

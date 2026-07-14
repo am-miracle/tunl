@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -19,9 +20,10 @@ pub async fn run(
     service: String,
     target: Arc<dyn Target>,
     listener: TcpListener,
-    connection: ConnectionPolicy,
+    policy: watch::Receiver<ConnectionPolicy>,
     token: CancellationToken,
 ) {
+    let connection = *policy.borrow();
     info!(
         service = %service,
         target = %target.describe(),
@@ -47,6 +49,9 @@ pub async fn run(
                         continue;
                     }
                 };
+
+                // Sampled per connection, so an edit only affects connections accepted after it.
+                let connection = *policy.borrow();
 
                 connections.spawn(connect_and_bridge(
                     service.clone(),

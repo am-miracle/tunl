@@ -34,11 +34,13 @@ async fn echo_round_trip() {
         tunl::target::from_uri("test", &format!("remote://127.0.0.1:{echo_port}")).unwrap(),
     );
 
+    let (_policy_tx, policy_rx) =
+        tokio::sync::watch::channel(tunl::config::ConnectionPolicy::default());
     tokio::spawn(tunl::tunnel::run(
         "test".to_string(),
         target,
         tunnel_listener,
-        tunl::config::ConnectionPolicy::default(),
+        policy_rx,
         CancellationToken::new(),
     ));
 

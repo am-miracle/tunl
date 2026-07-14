@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tokio::net::TcpListener;
+use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -20,6 +21,8 @@ pub enum ExitReason {
 struct ActiveEntry {
     token: CancellationToken,
     address: SocketAddr,
+    // Paired with the Receiver tunnel::run samples per connection; see update_policy.
+    policy: watch::Sender<ConnectionPolicy>,
 }
 
 /// Tracks running tunnel tasks by service name so one service can be
@@ -62,13 +65,21 @@ impl Registry {
         let token = self.root.child_token();
         let run_token = token.clone();
         let run_name = name.clone();
+        let (policy_tx, policy_rx) = watch::channel(connection);
 
         self.tasks.spawn(async move {
-            crate::tunnel::run(run_name.clone(), target, listener, connection, run_token).await;
+            crate::tunnel::run(run_name.clone(), target, listener, policy_rx, run_token).await;
             run_name
         });
 
-        self.active.insert(name, ActiveEntry { token, address });
+        self.active.insert(
+            name,
+            ActiveEntry {
+                token,
+                address,
+                policy: policy_tx,
+            },
+        );
     }
 
     /// Bind `address` and adopt the result. If a just-stopped service is still
@@ -89,6 +100,18 @@ impl Registry {
 
         self.adopt(name, address, target, listener, connection);
         Ok(())
+    }
+
+    /// Push a new policy into a running service without restarting it.
+    /// Existing connections keep the policy they started with; new
+    /// connections accepted after this call see the update. Returns `false`
+    /// if `name` is not currently active.
+    pub fn update_policy(&mut self, name: &str, connection: ConnectionPolicy) -> bool {
+        let Some(entry) = self.active.get(name) else {
+            return false;
+        };
+        entry.policy.send_replace(connection);
+        true
     }
 
     pub fn stop(&mut self, name: &str) -> bool {

@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::net::TcpListener as StdTcpListener;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -44,6 +45,45 @@ impl Target for EchoTarget {
 
 fn echo() -> Arc<dyn Target> {
     Arc::new(EchoTarget)
+}
+
+// Fails `failures` times, then connects like EchoTarget. Backoff-sensitive:
+// how long a connection takes to succeed depends on the retry policy in
+// effect when the connection is accepted.
+#[derive(Debug)]
+struct FlakyTarget {
+    failures_left: Mutex<usize>,
+}
+
+impl FlakyTarget {
+    fn new(failures: usize) -> Arc<Self> {
+        Arc::new(Self {
+            failures_left: Mutex::new(failures),
+        })
+    }
+}
+
+#[async_trait]
+impl Target for FlakyTarget {
+    async fn connect(&self) -> anyhow::Result<Box<dyn AsyncReadWrite>> {
+        {
+            let mut left = self.failures_left.lock().unwrap();
+            if *left > 0 {
+                *left -= 1;
+                anyhow::bail!("fake connect failure");
+            }
+        }
+        let (local, remote) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            let (mut r, mut w) = tokio::io::split(local);
+            tokio::io::copy(&mut r, &mut w).await.ok();
+        });
+        Ok(Box::new(remote))
+    }
+
+    fn describe(&self) -> String {
+        "fake://flaky".to_string()
+    }
 }
 
 fn localhost(port: u16) -> SocketAddr {
@@ -186,4 +226,48 @@ async fn cancel_all_drains_every_service() {
     seen.sort();
     assert_eq!(seen, vec!["a".to_string(), "b".to_string()]);
     assert_eq!(registry.task_count(), 0);
+}
+
+#[tokio::test]
+async fn update_policy_applies_to_new_connections_without_restarting() {
+    // Adopt with a policy that is deliberately too slow for the test
+    // deadline below, then update it before ever connecting a client. If
+    // update_policy did nothing and the connection still used the slow
+    // policy sampled at adopt time, this would time out.
+    let port = free_port();
+    let mut registry = Registry::new();
+    let slow = ConnectionPolicy {
+        connect_timeout: Duration::from_secs(5),
+        backoff_initial: Duration::from_secs(2),
+        backoff_max: Duration::from_secs(2),
+    };
+    registry
+        .start(
+            "svc".to_string(),
+            localhost(port),
+            FlakyTarget::new(1),
+            slow,
+        )
+        .await
+        .unwrap();
+
+    let fast = ConnectionPolicy {
+        connect_timeout: Duration::from_secs(5),
+        backoff_initial: Duration::from_millis(10),
+        backoff_max: Duration::from_millis(10),
+    };
+    assert!(registry.update_policy("svc", fast));
+
+    tokio::time::timeout(Duration::from_millis(500), round_trip(port))
+        .await
+        .expect("connection did not use the updated (fast) backoff policy");
+
+    // No stop/start happened: it is still the one original task.
+    assert_eq!(registry.task_count(), 1);
+}
+
+#[tokio::test]
+async fn update_policy_returns_false_for_an_unknown_service() {
+    let mut registry = Registry::new();
+    assert!(!registry.update_policy("does-not-exist", ConnectionPolicy::default()));
 }

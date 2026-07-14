@@ -56,11 +56,12 @@ async fn spawn_tunnel_with_policy(
     let port = listener.local_addr().unwrap().port();
     let token = CancellationToken::new();
     let target: Arc<dyn Target> = target;
+    let (_policy_tx, policy_rx) = tokio::sync::watch::channel(connection);
     tokio::spawn(tunl::tunnel::run(
         "test".to_string(),
         target,
         listener,
-        connection,
+        policy_rx,
         token.child_token(),
     ));
     (port, token)
@@ -127,12 +128,13 @@ async fn tunnel_accept_loop_stops_on_cancel() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let token = CancellationToken::new();
     let target: Arc<dyn Target> = FakeTarget::new(usize::MAX);
+    let (_policy_tx, policy_rx) = tokio::sync::watch::channel(ConnectionPolicy::default());
 
     let handle = tokio::spawn(tunl::tunnel::run(
         "test".to_string(),
         target,
         listener,
-        ConnectionPolicy::default(),
+        policy_rx,
         token.child_token(),
     ));
 

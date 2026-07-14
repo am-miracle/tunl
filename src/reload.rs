@@ -8,18 +8,42 @@ use crate::config::Service;
 use crate::registry::Registry;
 use crate::target::Target;
 
-/// Service names added, removed, or changed between two configs.
+/// Service names added, removed, changed, or only retuned between two
+/// configs. `changed` stops and rebinds the service; `policy_updated` is
+/// applied live via `Registry::update_policy`, no drop or rebind.
 #[derive(Debug, Default, PartialEq)]
 pub struct ReloadPlan {
     pub added: Vec<String>,
     pub removed: Vec<String>,
     pub changed: Vec<String>,
+    pub policy_updated: Vec<String>,
 }
 
 impl ReloadPlan {
     pub fn is_empty(&self) -> bool {
-        self.added.is_empty() && self.removed.is_empty() && self.changed.is_empty()
+        self.added.is_empty()
+            && self.removed.is_empty()
+            && self.changed.is_empty()
+            && self.policy_updated.is_empty()
     }
+}
+
+/// Deliberately exhaustive: adding a field to `Service` breaks this on
+/// purpose, so the next person has to decide whether it's identity (add it
+/// here, forces a restart) or tuning (leave it out, applies live) instead of
+/// it silently landing in the wrong bucket.
+fn requires_restart(old: &Service, new: &Service) -> bool {
+    let Service {
+        local_port,
+        bind_address,
+        allow_remote_connections,
+        target,
+        connection: _, // tuning: read per-connection, applied live instead
+    } = old;
+    *local_port != new.local_port
+        || *bind_address != new.bind_address
+        || *allow_remote_connections != new.allow_remote_connections
+        || *target != new.target
 }
 
 /// Compare two service maps by name.
@@ -29,7 +53,13 @@ pub fn diff(old: &HashMap<String, Service>, new: &HashMap<String, Service>) -> R
     for (name, new_service) in new {
         match old.get(name) {
             None => plan.added.push(name.clone()),
-            Some(old_service) if old_service != new_service => plan.changed.push(name.clone()),
+            Some(old_service) if old_service != new_service => {
+                if requires_restart(old_service, new_service) {
+                    plan.changed.push(name.clone());
+                } else {
+                    plan.policy_updated.push(name.clone());
+                }
+            }
             Some(_) => {}
         }
     }
@@ -45,6 +75,7 @@ pub fn diff(old: &HashMap<String, Service>, new: &HashMap<String, Service>) -> R
     plan.added.sort();
     plan.removed.sort();
     plan.changed.sort();
+    plan.policy_updated.sort();
     plan
 }
 
@@ -107,8 +138,38 @@ async fn apply_plan(
             failed.push(name.clone());
         }
     }
+    for name in &plan.policy_updated {
+        if !update_policy_one(registry, name, services).await {
+            failed.push(name.clone());
+        }
+    }
 
     failed
+}
+
+/// A name only reaches `policy_updated` because it's unchanged (aside from
+/// `connection`) in both configs, so the registry should already have it
+/// active. Falls back to a full restart if that invariant is ever wrong,
+/// since silently dropping the edit would be worse than a brief restart.
+async fn update_policy_one(
+    registry: &mut Registry,
+    name: &str,
+    services: &HashMap<String, Service>,
+) -> bool {
+    let Some(service) = services.get(name) else {
+        return false;
+    };
+
+    if registry.update_policy(name, service.connection) {
+        info!(service = %name, "service_policy_updated");
+        return true;
+    }
+
+    warn!(
+        service = %name,
+        "service was not active for a policy-only update; falling back to a restart"
+    );
+    start_one(registry, name, services, true).await
 }
 
 async fn start_one(
@@ -232,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_connection_policy_change() {
+    fn connection_policy_change_is_a_live_update_not_a_restart() {
         let mut old = HashMap::new();
         old.insert("api".to_string(), svc(8080, "remote://api.internal:8080"));
 
@@ -241,7 +302,26 @@ mod tests {
         let mut new = HashMap::new();
         new.insert("api".to_string(), changed);
 
-        assert_eq!(diff(&old, &new).changed, vec!["api".to_string()]);
+        let plan = diff(&old, &new);
+        assert_eq!(plan.policy_updated, vec!["api".to_string()]);
+        assert!(plan.changed.is_empty());
+    }
+
+    #[test]
+    fn identity_change_wins_over_simultaneous_policy_change() {
+        // If both an identity field (target) and connection differ, the
+        // service must restart, not silently apply only the policy half.
+        let mut old = HashMap::new();
+        old.insert("api".to_string(), svc(8080, "remote://api.internal:8080"));
+
+        let mut changed = svc(8080, "remote://api-v2.internal:8080");
+        changed.connection.connect_timeout = std::time::Duration::from_secs(3);
+        let mut new = HashMap::new();
+        new.insert("api".to_string(), changed);
+
+        let plan = diff(&old, &new);
+        assert_eq!(plan.changed, vec!["api".to_string()]);
+        assert!(plan.policy_updated.is_empty());
     }
 
     #[test]
@@ -448,5 +528,73 @@ mod tests {
         // silently left on the old one after a bind failure.
         assert_eq!(current.get("svc-a").unwrap().local_port, port_b as i64);
         assert_eq!(current.get("svc-b").unwrap().local_port, port_a as i64);
+    }
+
+    // A target that always connects and echoes bytes back, so this test can
+    // prove a bridge stays alive by keeping bytes flowing through it, not
+    // just by inspecting bookkeeping.
+    #[derive(Debug)]
+    struct EchoTarget;
+
+    #[async_trait::async_trait]
+    impl Target for EchoTarget {
+        async fn connect(&self) -> anyhow::Result<Box<dyn crate::io::AsyncReadWrite>> {
+            let (local, remote) = tokio::io::duplex(4096);
+            tokio::spawn(async move {
+                let (mut r, mut w) = tokio::io::split(local);
+                tokio::io::copy(&mut r, &mut w).await.ok();
+            });
+            Ok(Box::new(remote))
+        }
+
+        fn describe(&self) -> String {
+            "fake://echo".to_string()
+        }
+    }
+
+    #[tokio::test]
+    async fn policy_only_reload_does_not_drop_the_active_bridge() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpStream;
+
+        // Regression test for requires_restart: a [services.api.connection]-only
+        // edit must not close this connection.
+        let port = free_port();
+        let mut registry = Registry::new();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let target: Arc<dyn Target> = Arc::new(EchoTarget);
+        registry.adopt(
+            "api".to_string(),
+            SocketAddr::from(([127, 0, 0, 1], port)),
+            target,
+            listener,
+            crate::config::ConnectionPolicy::default(),
+        );
+
+        let mut client = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        client.write_all(b"ping").await.unwrap();
+        let mut buf = [0u8; 4];
+        client.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"ping");
+
+        let mut current = HashMap::new();
+        current.insert("api".to_string(), svc(port as i64, "remote://ignored:1"));
+
+        let mut edited = svc(port as i64, "remote://ignored:1");
+        edited.connection.backoff_max = std::time::Duration::from_secs(1);
+        let mut new_services = HashMap::new();
+        new_services.insert("api".to_string(), edited);
+
+        let plan = apply(&mut registry, &mut current, new_services).await;
+        assert_eq!(plan.policy_updated, vec!["api".to_string()]);
+
+        // The same task is still alive: the bridge established before the
+        // reload still carries bytes, proving it was never stopped.
+        client.write_all(b"pong").await.unwrap();
+        client.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"pong");
+        assert_eq!(registry.task_count(), 1);
     }
 }

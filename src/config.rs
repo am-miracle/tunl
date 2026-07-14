@@ -1,26 +1,64 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
+use std::time::Duration;
 
 use serde::Deserialize;
 
 use crate::error::{Error, Result};
 
 #[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Service {
     pub local_port: i64,
     #[serde(default = "default_bind_address")]
     pub bind_address: IpAddr,
     #[serde(default)]
     pub allow_remote_connections: bool,
+    #[serde(default)]
+    pub connection: ConnectionPolicy,
     pub target: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectionPolicy {
+    #[serde(default = "default_connect_timeout", with = "humantime_serde")]
+    pub connect_timeout: Duration,
+    #[serde(default = "default_backoff_initial", with = "humantime_serde")]
+    pub backoff_initial: Duration,
+    #[serde(default = "default_backoff_max", with = "humantime_serde")]
+    pub backoff_max: Duration,
+}
+
+impl Default for ConnectionPolicy {
+    fn default() -> Self {
+        Self {
+            connect_timeout: default_connect_timeout(),
+            backoff_initial: default_backoff_initial(),
+            backoff_max: default_backoff_max(),
+        }
+    }
 }
 
 fn default_bind_address() -> IpAddr {
     IpAddr::V4(Ipv4Addr::LOCALHOST)
 }
 
+fn default_connect_timeout() -> Duration {
+    Duration::from_secs(10)
+}
+
+fn default_backoff_initial() -> Duration {
+    Duration::from_secs(1)
+}
+
+fn default_backoff_max() -> Duration {
+    Duration::from_secs(15)
+}
+
 #[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub services: HashMap<String, Service>,
 }
@@ -57,12 +95,41 @@ impl Config {
                     address: service.bind_address,
                 });
             }
+            validate_connection_policy(name, service.connection)?;
         }
 
         check_duplicate_ports(&self.services)?;
 
         Ok(())
     }
+}
+
+fn validate_connection_policy(service: &str, policy: ConnectionPolicy) -> Result<()> {
+    if policy.connect_timeout.is_zero() {
+        return Err(Error::InvalidConnectionPolicy {
+            service: service.to_string(),
+            reason: "connect_timeout must be greater than 0".to_string(),
+        });
+    }
+    if policy.backoff_initial.is_zero() {
+        return Err(Error::InvalidConnectionPolicy {
+            service: service.to_string(),
+            reason: "backoff_initial must be greater than 0".to_string(),
+        });
+    }
+    if policy.backoff_max.is_zero() {
+        return Err(Error::InvalidConnectionPolicy {
+            service: service.to_string(),
+            reason: "backoff_max must be greater than 0".to_string(),
+        });
+    }
+    if policy.backoff_initial > policy.backoff_max {
+        return Err(Error::InvalidConnectionPolicy {
+            service: service.to_string(),
+            reason: "backoff_initial must be less than or equal to backoff_max".to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn validate_port(service: &str, port: i64) -> Result<()> {

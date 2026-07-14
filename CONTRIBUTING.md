@@ -75,19 +75,7 @@ V2 includes label-based Kubernetes targeting, hot config reload, and SSH bastion
 
 If you want to work on one, open an issue first so we can agree on the approach before you write code.
 
-### 1. Configurable timeouts and backoff
-
-**Problem.** The connect timeout (10s) and the backoff (1s growing to 15s) are hardcoded in `src/tunnel.rs` and `src/backoff.rs`.
-
-**Goal.** Allow a service to override them, keeping the current values as defaults.
-
-**Where.** `src/config.rs`, `src/tunnel.rs`, `src/backoff.rs`.
-
-**Done when.** A service can set its own connect timeout and backoff bounds, and a service that sets nothing behaves exactly as it does now.
-
-**Size.** Small. Good first issue.
-
-### 2. Docker and Kubernetes integration tests in CI
+### 1. Docker and Kubernetes integration tests in CI
 
 **Problem.** The Docker and Kubernetes paths are verified by hand. V2 adds label resolution and reload, which touch the riskiest code, so this is the moment to automate those checks.
 
@@ -99,7 +87,7 @@ If you want to work on one, open an issue first so we can agree on the approach 
 
 **Size.** Medium.
 
-### 3. Health dashboard
+### 2. Health dashboard
 
 **Problem.** There is no at-a-glance view of what is up. To see tunnel state you read the logs.
 
@@ -111,7 +99,7 @@ If you want to work on one, open an issue first so we can agree on the approach 
 
 **Size.** Large, mostly because of the state-reporting plumbing rather than the UI itself.
 
-### 4. `tunl init`
+### 3. `tunl init`
 
 **Problem.** Writing the first config by hand means looking up pod names, container names, and ports before you can start.
 

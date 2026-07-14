@@ -6,6 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tunl::backoff::Backoff;
+use tunl::config::ConnectionPolicy;
 use tunl::io::AsyncReadWrite;
 use tunl::target::Target;
 
@@ -47,7 +48,10 @@ impl Target for FakeTarget {
     }
 }
 
-async fn spawn_tunnel(target: Arc<FakeTarget>) -> (u16, CancellationToken) {
+async fn spawn_tunnel_with_policy(
+    target: Arc<FakeTarget>,
+    connection: ConnectionPolicy,
+) -> (u16, CancellationToken) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let token = CancellationToken::new();
@@ -56,14 +60,19 @@ async fn spawn_tunnel(target: Arc<FakeTarget>) -> (u16, CancellationToken) {
         "test".to_string(),
         target,
         listener,
+        connection,
         token.child_token(),
     ));
     (port, token)
 }
 
+async fn spawn_tunnel(target: Arc<FakeTarget>) -> (u16, CancellationToken) {
+    spawn_tunnel_with_policy(target, ConnectionPolicy::default()).await
+}
+
 #[test]
 fn backoff_sequence_and_reset() {
-    let mut b = Backoff::new();
+    let mut b = Backoff::with_base(Duration::from_secs(1), Duration::from_secs(15));
     assert_eq!(b.delay(), Duration::from_secs(1));
     assert_eq!(b.delay(), Duration::from_secs(2));
     assert_eq!(b.delay(), Duration::from_secs(4));
@@ -123,6 +132,7 @@ async fn tunnel_accept_loop_stops_on_cancel() {
         "test".to_string(),
         target,
         listener,
+        ConnectionPolicy::default(),
         token.child_token(),
     ));
 
@@ -132,6 +142,30 @@ async fn tunnel_accept_loop_stops_on_cancel() {
         .await
         .expect("tunnel task did not exit within 1s after cancellation")
         .expect("tunnel task panicked");
+}
+
+#[tokio::test]
+async fn custom_backoff_policy_is_used_for_retries() {
+    let (port, _token) = spawn_tunnel_with_policy(
+        FakeTarget::new(1),
+        ConnectionPolicy {
+            connect_timeout: Duration::from_secs(5),
+            backoff_initial: Duration::from_millis(10),
+            backoff_max: Duration::from_millis(10),
+        },
+    )
+    .await;
+
+    let mut client = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        client.write_all(b"retry").await.unwrap();
+        let mut buf = vec![0u8; 5];
+        client.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"retry");
+    })
+    .await
+    .expect("custom retry policy was not applied");
 }
 
 #[tokio::test]

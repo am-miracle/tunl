@@ -12,3 +12,8 @@ local_port = 8080
 bind_address = "::"
 allow_remote_connections = true
 target = "kubectl://default/web-0:8080"
+
+[services.web.connection]
+connect_timeout = "5s"
+backoff_initial = "500ms"
+backoff_max = "10s"

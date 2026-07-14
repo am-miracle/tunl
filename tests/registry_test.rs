@@ -5,6 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tunl::config::ConnectionPolicy;
 use tunl::io::AsyncReadWrite;
 use tunl::registry::{ExitReason, Registry};
 use tunl::target::Target;
@@ -62,7 +63,12 @@ async fn start_serves_traffic_and_stop_drains_it() {
     let port = free_port();
     let mut registry = Registry::new();
     registry
-        .start("svc".to_string(), localhost(port), echo())
+        .start(
+            "svc".to_string(),
+            localhost(port),
+            echo(),
+            ConnectionPolicy::default(),
+        )
         .await
         .unwrap();
 
@@ -85,7 +91,12 @@ async fn restarting_a_service_on_the_same_port_does_not_race_the_old_listener() 
     let port = free_port();
     let mut registry = Registry::new();
     registry
-        .start("old".to_string(), localhost(port), echo())
+        .start(
+            "old".to_string(),
+            localhost(port),
+            echo(),
+            ConnectionPolicy::default(),
+        )
         .await
         .unwrap();
     round_trip(port).await;
@@ -94,7 +105,12 @@ async fn restarting_a_service_on_the_same_port_does_not_race_the_old_listener() 
     // No sleep here on purpose: start() itself must wait for "old" to finish
     // draining before it binds the same port for "new".
     registry
-        .start("new".to_string(), localhost(port), echo())
+        .start(
+            "new".to_string(),
+            localhost(port),
+            echo(),
+            ConnectionPolicy::default(),
+        )
         .await
         .unwrap();
 
@@ -108,11 +124,21 @@ async fn independent_services_do_not_affect_each_other() {
     let port_b = free_port();
     let mut registry = Registry::new();
     registry
-        .start("a".to_string(), localhost(port_a), echo())
+        .start(
+            "a".to_string(),
+            localhost(port_a),
+            echo(),
+            ConnectionPolicy::default(),
+        )
         .await
         .unwrap();
     registry
-        .start("b".to_string(), localhost(port_b), echo())
+        .start(
+            "b".to_string(),
+            localhost(port_b),
+            echo(),
+            ConnectionPolicy::default(),
+        )
         .await
         .unwrap();
 
@@ -132,11 +158,21 @@ async fn cancel_all_drains_every_service() {
     let port_b = free_port();
     let mut registry = Registry::new();
     registry
-        .start("a".to_string(), localhost(port_a), echo())
+        .start(
+            "a".to_string(),
+            localhost(port_a),
+            echo(),
+            ConnectionPolicy::default(),
+        )
         .await
         .unwrap();
     registry
-        .start("b".to_string(), localhost(port_b), echo())
+        .start(
+            "b".to_string(),
+            localhost(port_b),
+            echo(),
+            ConnectionPolicy::default(),
+        )
         .await
         .unwrap();
 

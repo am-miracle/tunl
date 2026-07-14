@@ -10,18 +10,26 @@ use tracing::{info, warn};
 
 use crate::backoff::Backoff;
 use crate::bridge;
+use crate::config::ConnectionPolicy;
 use crate::target::Target;
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub async fn run(
     service: String,
     target: Arc<dyn Target>,
     listener: TcpListener,
+    connection: ConnectionPolicy,
     token: CancellationToken,
 ) {
-    info!(service = %service, target = %target.describe(), "listening");
+    info!(
+        service = %service,
+        target = %target.describe(),
+        connect_timeout_secs = connection.connect_timeout.as_secs_f32(),
+        backoff_initial_secs = connection.backoff_initial.as_secs_f32(),
+        backoff_max_secs = connection.backoff_max.as_secs_f32(),
+        "listening"
+    );
 
     let mut connections: JoinSet<()> = JoinSet::new();
 
@@ -45,6 +53,7 @@ pub async fn run(
                     Arc::clone(&target),
                     stream,
                     peer,
+                    connection,
                     token.child_token(),
                 ));
             }
@@ -61,14 +70,15 @@ async fn connect_and_bridge(
     target: Arc<dyn Target>,
     stream: TcpStream,
     peer: SocketAddr,
+    connection: ConnectionPolicy,
     token: CancellationToken,
 ) {
-    let mut backoff = Backoff::new();
+    let mut backoff = Backoff::with_base(connection.backoff_initial, connection.backoff_max);
 
     let remote = loop {
         info!(service = %service, %peer, "connect_attempt_started");
 
-        let result = tokio::time::timeout(CONNECT_TIMEOUT, target.connect()).await;
+        let result = tokio::time::timeout(connection.connect_timeout, target.connect()).await;
 
         let err = match result {
             Ok(Ok(remote)) => {
@@ -76,7 +86,7 @@ async fn connect_and_bridge(
                 break remote;
             }
             Ok(Err(e)) => e,
-            Err(_) => anyhow::anyhow!("timed out after {CONNECT_TIMEOUT:?}"),
+            Err(_) => anyhow::anyhow!("timed out after {:?}", connection.connect_timeout),
         };
 
         let delay = backoff.delay();

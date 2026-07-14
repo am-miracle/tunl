@@ -7,6 +7,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
+use crate::config::ConnectionPolicy;
 use crate::target::Target;
 
 /// Why a task left the registry.
@@ -56,13 +57,14 @@ impl Registry {
         address: SocketAddr,
         target: Arc<dyn Target>,
         listener: TcpListener,
+        connection: ConnectionPolicy,
     ) {
         let token = self.root.child_token();
         let run_token = token.clone();
         let run_name = name.clone();
 
         self.tasks.spawn(async move {
-            crate::tunnel::run(run_name.clone(), target, listener, run_token).await;
+            crate::tunnel::run(run_name.clone(), target, listener, connection, run_token).await;
             run_name
         });
 
@@ -77,6 +79,7 @@ impl Registry {
         name: String,
         address: SocketAddr,
         target: Arc<dyn Target>,
+        connection: ConnectionPolicy,
     ) -> anyhow::Result<()> {
         self.await_port_free(address.port()).await;
 
@@ -84,7 +87,7 @@ impl Registry {
             .await
             .map_err(|e| anyhow::anyhow!("[{name}] failed to bind {address}: {e}"))?;
 
-        self.adopt(name, address, target, listener);
+        self.adopt(name, address, target, listener, connection);
         Ok(())
     }
 

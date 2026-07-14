@@ -45,10 +45,16 @@ target = "kubectl://default/api-0:8080"
 [services.internal_db]
 local_port = 25432
 target = "ssh://deploy@bastion.example.com/db.internal:5432"
+
+[services.internal_db.connection]
+connect_timeout = "5s"
+backoff_initial = "500ms"
+backoff_max = "10s"
 ```
 
 - `local_port` is the port on your machine that `tunl` listens on.
 - `bind_address` is optional and defaults to `127.0.0.1`. Use `::1` for IPv6 loopback.
+- `connection` is optional. Use it when a service needs a different connect timeout or retry backoff.
 - `target` is where that traffic goes, written as a URI.
 
 `0.0.0.0`, `::`, and other non-loopback addresses can expose a tunnel to other machines. Tunl rejects these addresses unless the service acknowledges the exposure:
@@ -120,6 +126,17 @@ If your agent contains several keys, append `?identity=<fingerprint>` to select 
 ## Reconnection
 
 When a target is down, `tunl` retries with a backoff that grows from one second up to fifteen, then connects as soon as the target is back. The retry covers connection setup. An open connection that drops is closed, and the next client connection sets up a fresh tunnel. Restart a pod or a container and the next request goes through once it is ready.
+
+Each service can tune the connection setup policy:
+
+```toml
+[services.api.connection]
+connect_timeout = "5s"
+backoff_initial = "500ms"
+backoff_max = "10s"
+```
+
+The defaults are `10s`, `1s`, and `15s`. Durations must be greater than zero, and `backoff_initial` must not be higher than `backoff_max`. Very small retry values can put pressure on a failing backend, so use them for local tests rather than shared infrastructure.
 
 ## Limitations
 

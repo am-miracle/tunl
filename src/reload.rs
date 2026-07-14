@@ -133,7 +133,10 @@ async fn start_one(
     if !service.bind_address.is_loopback() {
         warn!(service = %name, %address, "remote_listener_enabled");
     }
-    match registry.start(name.to_string(), address, target).await {
+    match registry
+        .start(name.to_string(), address, target, service.connection)
+        .await
+    {
         Ok(()) if is_restart => {
             info!(service = %name, %address, "service_restarted");
             true
@@ -158,6 +161,7 @@ mod tests {
             local_port: port,
             bind_address: "127.0.0.1".parse().unwrap(),
             allow_remote_connections: false,
+            connection: crate::config::ConnectionPolicy::default(),
             target: target.to_string(),
         }
     }
@@ -221,6 +225,19 @@ mod tests {
 
         let mut changed = svc(8080, "remote://api.internal:8080");
         changed.bind_address = "::1".parse().unwrap();
+        let mut new = HashMap::new();
+        new.insert("api".to_string(), changed);
+
+        assert_eq!(diff(&old, &new).changed, vec!["api".to_string()]);
+    }
+
+    #[test]
+    fn detects_connection_policy_change() {
+        let mut old = HashMap::new();
+        old.insert("api".to_string(), svc(8080, "remote://api.internal:8080"));
+
+        let mut changed = svc(8080, "remote://api.internal:8080");
+        changed.connection.connect_timeout = std::time::Duration::from_secs(3);
         let mut new = HashMap::new();
         new.insert("api".to_string(), changed);
 
@@ -328,6 +345,7 @@ mod tests {
             SocketAddr::from(([127, 0, 0, 1], old_port)),
             target,
             listener,
+            crate::config::ConnectionPolicy::default(),
         );
 
         let mut current = HashMap::new();
@@ -386,6 +404,7 @@ mod tests {
             SocketAddr::from(([127, 0, 0, 1], port_a)),
             target_a,
             listener_a,
+            crate::config::ConnectionPolicy::default(),
         );
 
         let listener_b = tokio::net::TcpListener::bind(("127.0.0.1", port_b))
@@ -398,6 +417,7 @@ mod tests {
             SocketAddr::from(([127, 0, 0, 1], port_b)),
             target_b,
             listener_b,
+            crate::config::ConnectionPolicy::default(),
         );
 
         let mut current = HashMap::new();

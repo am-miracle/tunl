@@ -39,6 +39,9 @@ pub enum Error {
     )]
     RemoteBindingNotAllowed { service: String, address: IpAddr },
 
+    #[error("[{service}] connection settings are invalid: {reason}")]
+    InvalidConnectionPolicy { service: String, reason: String },
+
     // {target:?} instead of {target} so the value gets wrapped in quotes,
     // making it clear where the URI starts and ends in the message.
     #[error(

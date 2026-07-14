@@ -79,6 +79,21 @@ async fn initial_start(
     services: &HashMap<String, Service>,
     registry: &mut Registry,
 ) -> anyhow::Result<()> {
+    struct ParsedService {
+        name: String,
+        address: SocketAddr,
+        target: Box<dyn Target>,
+        connection: tunl::config::ConnectionPolicy,
+    }
+
+    struct ReadyService {
+        name: String,
+        address: SocketAddr,
+        target: Arc<dyn Target>,
+        listener: tokio::net::TcpListener,
+        connection: tunl::config::ConnectionPolicy,
+    }
+
     let mut parsed = Vec::with_capacity(services.len());
     for (name, service) in services {
         let target = tunl::target::from_uri(name, &service.target)?;
@@ -86,20 +101,37 @@ async fn initial_start(
         if !service.bind_address.is_loopback() {
             warn!(service = %name, %address, "remote_listener_enabled");
         }
-        parsed.push((name.clone(), address, target));
+        parsed.push(ParsedService {
+            name: name.clone(),
+            address,
+            target,
+            connection: service.connection,
+        });
     }
 
     let mut ready = Vec::with_capacity(parsed.len());
-    for (name, address, target) in parsed {
-        let listener = tunl::listener::bind(address)
-            .await
-            .map_err(|e| anyhow::anyhow!("[{name}] failed to bind {address}: {e}"))?;
-        let target: Arc<dyn Target> = Arc::from(target);
-        ready.push((name, address, target, listener));
+    for service in parsed {
+        let listener = tunl::listener::bind(service.address).await.map_err(|e| {
+            anyhow::anyhow!("[{}] failed to bind {}: {e}", service.name, service.address)
+        })?;
+        let target: Arc<dyn Target> = Arc::from(service.target);
+        ready.push(ReadyService {
+            name: service.name,
+            address: service.address,
+            target,
+            listener,
+            connection: service.connection,
+        });
     }
 
-    for (name, address, target, listener) in ready {
-        registry.adopt(name, address, target, listener);
+    for service in ready {
+        registry.adopt(
+            service.name,
+            service.address,
+            service.target,
+            service.listener,
+            service.connection,
+        );
     }
     Ok(())
 }

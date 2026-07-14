@@ -1,5 +1,6 @@
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::time::Duration;
 
 use tempfile::NamedTempFile;
 use tunl::config::Config;
@@ -36,11 +37,174 @@ fn valid_config_parses_into_expected_structs() {
     assert_eq!(postgres.local_port, 5432);
     assert_eq!(postgres.bind_address, IpAddr::V4(Ipv4Addr::LOCALHOST));
     assert!(!postgres.allow_remote_connections);
+    assert_eq!(postgres.connection.connect_timeout, Duration::from_secs(10));
+    assert_eq!(postgres.connection.backoff_initial, Duration::from_secs(1));
+    assert_eq!(postgres.connection.backoff_max, Duration::from_secs(15));
     assert_eq!(postgres.target, "kubectl://default/postgres-0:5432");
 
     let redis = &config.services["redis"];
     assert_eq!(redis.local_port, 6379);
     assert_eq!(redis.target, "docker://redis:6379");
+}
+
+#[test]
+fn accepts_custom_connection_policy() {
+    let file = write_config(
+        r#"
+        [services.api]
+        local_port = 8080
+        target = "remote://api.internal:8080"
+
+        [services.api.connection]
+        connect_timeout = "5s"
+        backoff_initial = "250ms"
+        backoff_max = "3s"
+        "#,
+    );
+
+    let config = Config::load(file.path()).expect("custom connection policy should load");
+    let policy = config.services["api"].connection;
+    assert_eq!(policy.connect_timeout, Duration::from_secs(5));
+    assert_eq!(policy.backoff_initial, Duration::from_millis(250));
+    assert_eq!(policy.backoff_max, Duration::from_secs(3));
+}
+
+#[test]
+fn accepts_partial_connection_policy_override() {
+    let file = write_config(
+        r#"
+        [services.api]
+        local_port = 8080
+        target = "remote://api.internal:8080"
+
+        [services.api.connection]
+        connect_timeout = "2s"
+        "#,
+    );
+
+    let config = Config::load(file.path()).expect("partial connection policy should load");
+    let policy = config.services["api"].connection;
+    assert_eq!(policy.connect_timeout, Duration::from_secs(2));
+    assert_eq!(policy.backoff_initial, Duration::from_secs(1));
+    assert_eq!(policy.backoff_max, Duration::from_secs(15));
+}
+
+#[test]
+fn rejects_zero_connection_timeout() {
+    let file = write_config(
+        r#"
+        [services.api]
+        local_port = 8080
+        target = "remote://api.internal:8080"
+
+        [services.api.connection]
+        connect_timeout = "0s"
+        "#,
+    );
+
+    let err = Config::load(file.path()).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "[api] connection settings are invalid: connect_timeout must be greater than 0"
+    );
+}
+
+#[test]
+fn rejects_backoff_initial_above_max() {
+    let file = write_config(
+        r#"
+        [services.api]
+        local_port = 8080
+        target = "remote://api.internal:8080"
+
+        [services.api.connection]
+        backoff_initial = "5s"
+        backoff_max = "1s"
+        "#,
+    );
+
+    let err = Config::load(file.path()).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "[api] connection settings are invalid: backoff_initial must be less than or equal to backoff_max"
+    );
+}
+
+#[test]
+fn rejects_malformed_duration() {
+    let file = write_config(
+        r#"
+        [services.api]
+        local_port = 8080
+        target = "remote://api.internal:8080"
+
+        [services.api.connection]
+        connect_timeout = "fast"
+        "#,
+    );
+
+    let err = Config::load(file.path()).unwrap_err();
+    assert!(
+        err.to_string().starts_with("failed to parse config file"),
+        "unexpected error message: {err}"
+    );
+}
+
+#[test]
+fn rejects_unknown_top_level_field() {
+    let file = write_config(
+        r#"
+        version = 1
+
+        [services.api]
+        local_port = 8080
+        target = "remote://api.internal:8080"
+        "#,
+    );
+
+    let err = Config::load(file.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("unknown field `version`"),
+        "unexpected error message: {err}"
+    );
+}
+
+#[test]
+fn rejects_unknown_service_field() {
+    let file = write_config(
+        r#"
+        [services.api]
+        local_port = 8080
+        bind_adress = "127.0.0.1"
+        target = "remote://api.internal:8080"
+        "#,
+    );
+
+    let err = Config::load(file.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("unknown field `bind_adress`"),
+        "unexpected error message: {err}"
+    );
+}
+
+#[test]
+fn rejects_unknown_connection_policy_field() {
+    let file = write_config(
+        r#"
+        [services.api]
+        local_port = 8080
+        target = "remote://api.internal:8080"
+
+        [services.api.connection]
+        backoff_intial = "30s"
+        "#,
+    );
+
+    let err = Config::load(file.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("unknown field `backoff_intial`"),
+        "unexpected error message: {err}"
+    );
 }
 
 #[test]

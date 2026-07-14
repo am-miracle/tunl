@@ -38,6 +38,7 @@ async fn echo_round_trip() {
         "test".to_string(),
         target,
         tunnel_listener,
+        tunl::config::ConnectionPolicy::default(),
         CancellationToken::new(),
     ));
 

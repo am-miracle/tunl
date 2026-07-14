@@ -12,12 +12,20 @@ cd tunl
 cargo build
 ```
 
-Before you open a pull request, run the same three checks CI runs. All three must pass:
+Before you open a pull request, run the fast checks. All three must pass:
 
 ```sh
 cargo test
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
+```
+
+The real backend integration suite is separate because it starts Docker and a
+kind cluster. It expects the demo Docker container `tunl-demo` and kind pod
+`web-0` from `docs/demo-setup.sh`:
+
+```sh
+TUNL_REAL_BACKENDS=1 cargo test --test real_backend_integration_test -- --nocapture
 ```
 
 ## How the code is laid out
@@ -60,7 +68,7 @@ Everything else (the accept loop, reconnection, shutdown) is written once agains
 
 ## Standards a change needs to meet
 
-- **Tests.** New behavior needs a test. For target types that need real infrastructure (Docker, Kubernetes), unit-test the parsing and use a fake target for the logic, the same way `tests/tunnel_test.rs` does. Infrastructure-dependent end-to-end checks stay out of CI and go in a manual recipe, as the existing targets do.
+- **Tests.** New behavior needs a test. Keep fast tests focused on parsing, fake targets, and pure logic, the same way `tests/tunnel_test.rs` does. Real Docker and Kubernetes checks live in `tests/real_backend_integration_test.rs` and run in their own CI job so the normal feedback loop stays quick.
 - **Errors point somewhere.** When something fails, the message should tell the user what to do next. Look at `src/target/docker.rs` and `src/target/kubectl.rs` for the pattern: read the underlying error, map it to a clear sentence with the command to run.
 - **Match the surrounding style.** Comments explain why, not what. Keep them sparse. Run `cargo fmt`.
 - **Keep dependencies minimal.** Add a crate only when it earns its place, and turn off default features you do not use.
@@ -75,19 +83,7 @@ V2 includes label-based Kubernetes targeting, hot config reload, and SSH bastion
 
 If you want to work on one, open an issue first so we can agree on the approach before you write code.
 
-### 1. Docker and Kubernetes integration tests in CI
-
-**Problem.** The Docker and Kubernetes paths are verified by hand. V2 adds label resolution and reload, which touch the riskiest code, so this is the moment to automate those checks.
-
-**Goal.** A CI job that spins up a kind cluster and a throwaway container, then runs the real connect path against both. Keep it separate from the fast unit test job so the common case stays quick.
-
-**Where.** A new CI workflow plus a test harness. `docs/demo-setup.sh` already shows how to bring up both backends and is a good starting point.
-
-**Done when.** CI exercises a real Docker exec and a real pod port-forward, and fails if either breaks.
-
-**Size.** Medium.
-
-### 2. Health dashboard
+### 1. Health dashboard
 
 **Problem.** There is no at-a-glance view of what is up. To see tunnel state you read the logs.
 
@@ -99,7 +95,7 @@ If you want to work on one, open an issue first so we can agree on the approach 
 
 **Size.** Large, mostly because of the state-reporting plumbing rather than the UI itself.
 
-### 3. `tunl init`
+### 2. `tunl init`
 
 **Problem.** Writing the first config by hand means looking up pod names, container names, and ports before you can start.
 
@@ -115,7 +111,7 @@ tunl init --namespace default > config.toml
 
 **Size.** Medium.
 
-### 5. Authenticated listeners
+### 3. Authenticated listeners
 
 **Problem.** A service bound to a non-loopback address accepts any client that can reach its port. The `allow_remote_connections` setting acknowledges that exposure but does not protect the listener.
 

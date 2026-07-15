@@ -11,7 +11,7 @@ use tracing::{info, warn};
 
 use crate::backoff::Backoff;
 use crate::bridge;
-use crate::config::ConnectionPolicy;
+use crate::config::{ConnectionPolicy, HealthPolicy};
 use crate::health::{ConnectionHealth, ServiceHealth};
 use crate::target::Target;
 
@@ -22,6 +22,7 @@ pub async fn run(
     target: Arc<dyn Target>,
     listener: TcpListener,
     policy: watch::Receiver<ConnectionPolicy>,
+    health_policy: watch::Receiver<HealthPolicy>,
     health: ServiceHealth,
     token: CancellationToken,
 ) {
@@ -36,6 +37,13 @@ pub async fn run(
     );
 
     let mut connections: JoinSet<()> = JoinSet::new();
+    let probe = tokio::spawn(probe_target(
+        service.clone(),
+        Arc::clone(&target),
+        health_policy,
+        health.clone(),
+        token.child_token(),
+    ));
 
     loop {
         tokio::select! {
@@ -71,6 +79,114 @@ pub async fn run(
 
     // Drain: wait for all active connections to finish their bridge drain window.
     while connections.join_next().await.is_some() {}
+    let _ = probe.await;
+}
+
+async fn probe_target(
+    service: String,
+    target: Arc<dyn Target>,
+    mut policy: watch::Receiver<HealthPolicy>,
+    health: ServiceHealth,
+    token: CancellationToken,
+) {
+    let mut backoff = Backoff::with_base(
+        policy.borrow().probe_backoff_initial,
+        policy.borrow().probe_backoff_max,
+    );
+
+    loop {
+        let current = *policy.borrow();
+        health.mark_target_probing();
+
+        let result = tokio::time::timeout(current.probe_timeout, target.probe()).await;
+        match result {
+            Ok(Ok(())) => {
+                backoff =
+                    Backoff::with_base(current.probe_backoff_initial, current.probe_backoff_max);
+                health.mark_target_reachable();
+                info!(service = %service, "health_probe_succeeded");
+                match wait_for_probe_delay(current.probe_interval, &mut policy, &token).await {
+                    ProbeDelay::Elapsed => {}
+                    ProbeDelay::Changed => {
+                        let changed = *policy.borrow();
+                        backoff = Backoff::with_base(
+                            changed.probe_backoff_initial,
+                            changed.probe_backoff_max,
+                        );
+                    }
+                    ProbeDelay::Cancelled => return,
+                }
+            }
+            Ok(Err(e)) => {
+                let delay = backoff.delay();
+                health.mark_target_unreachable(&e);
+                warn!(
+                    service = %service,
+                    error = %e,
+                    retry_secs = delay.as_secs_f32(),
+                    "health_probe_failed"
+                );
+                match wait_for_probe_delay(delay, &mut policy, &token).await {
+                    ProbeDelay::Elapsed => {}
+                    ProbeDelay::Changed => {
+                        let changed = *policy.borrow();
+                        backoff = Backoff::with_base(
+                            changed.probe_backoff_initial,
+                            changed.probe_backoff_max,
+                        );
+                    }
+                    ProbeDelay::Cancelled => return,
+                }
+            }
+            Err(_) => {
+                let err = anyhow::anyhow!("timed out after {:?}", current.probe_timeout);
+                let delay = backoff.delay();
+                health.mark_target_unreachable(&err);
+                warn!(
+                    service = %service,
+                    error = %err,
+                    retry_secs = delay.as_secs_f32(),
+                    "health_probe_failed"
+                );
+                match wait_for_probe_delay(delay, &mut policy, &token).await {
+                    ProbeDelay::Elapsed => {}
+                    ProbeDelay::Changed => {
+                        let changed = *policy.borrow();
+                        backoff = Backoff::with_base(
+                            changed.probe_backoff_initial,
+                            changed.probe_backoff_max,
+                        );
+                    }
+                    ProbeDelay::Cancelled => return,
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeDelay {
+    Elapsed,
+    Changed,
+    Cancelled,
+}
+
+async fn wait_for_probe_delay(
+    delay: Duration,
+    policy: &mut watch::Receiver<HealthPolicy>,
+    token: &CancellationToken,
+) -> ProbeDelay {
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => ProbeDelay::Elapsed,
+        _ = token.cancelled() => ProbeDelay::Cancelled,
+        changed = policy.changed() => {
+            if changed.is_ok() {
+                ProbeDelay::Changed
+            } else {
+                ProbeDelay::Cancelled
+            }
+        },
+    }
 }
 
 async fn connect_and_bridge(

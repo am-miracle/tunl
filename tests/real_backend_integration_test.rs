@@ -4,7 +4,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
-use tunl::config::ConnectionPolicy;
+use tunl::config::{ConnectionPolicy, HealthPolicy};
 use tunl::health::HealthRegistry;
 use tunl::target::Target;
 
@@ -32,6 +32,8 @@ async fn assert_target_response(
     let target: Arc<dyn Target> = Arc::from(tunl::target::from_uri(service, target_uri)?);
     let token = CancellationToken::new();
     let (_policy_tx, policy_rx) = tokio::sync::watch::channel(test_policy());
+    let (_health_policy_tx, health_policy_rx) =
+        tokio::sync::watch::channel(HealthPolicy::default());
     let health = HealthRegistry::default().register(
         service.to_string(),
         ([127, 0, 0, 1], port).into(),
@@ -42,6 +44,7 @@ async fn assert_target_response(
         target,
         listener,
         policy_rx,
+        health_policy_rx,
         health,
         token.child_token(),
     ));

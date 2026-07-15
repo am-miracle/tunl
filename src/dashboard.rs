@@ -7,10 +7,10 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table};
+use ratatui::widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table, Wrap};
 use tokio::sync::mpsc;
 
-use crate::health::{HealthRegistry, ServiceSnapshot, ServiceStatus};
+use crate::health::{HealthRegistry, ListenerStatus, ServiceSnapshot, TargetStatus};
 
 const TICK_RATE: Duration = Duration::from_millis(150);
 
@@ -108,13 +108,13 @@ fn render_header(frame: &mut Frame, area: Rect, services: &[ServiceSnapshot]) {
     .block(Block::default().padding(ratatui::widgets::Padding::new(0, 0, 1, 0)));
     frame.render_widget(brand_widget, brand);
 
-    let up = services
+    let reachable = services
         .iter()
-        .filter(|service| service.status == ServiceStatus::Up)
+        .filter(|service| service.target_status == TargetStatus::Reachable)
         .count();
-    let attention = services
+    let unreachable = services
         .iter()
-        .filter(|service| service.status == ServiceStatus::Retrying)
+        .filter(|service| service.target_status == TargetStatus::Unreachable)
         .count();
     let connections: usize = services
         .iter()
@@ -122,11 +122,14 @@ fn render_header(frame: &mut Frame, area: Rect, services: &[ServiceSnapshot]) {
         .sum();
 
     let summary_line = Line::from(vec![
-        Span::styled(format!("{up} last up"), Style::default().fg(SUCCESS)),
+        Span::styled(
+            format!("{reachable} reachable"),
+            Style::default().fg(SUCCESS),
+        ),
         Span::styled("   ", Style::default()),
         Span::styled(
-            format!("{attention} retrying"),
-            Style::default().fg(if attention == 0 { MUTED } else { WARNING }),
+            format!("{unreachable} unreachable"),
+            Style::default().fg(if unreachable == 0 { MUTED } else { WARNING }),
         ),
         Span::styled("   ", Style::default()),
         Span::styled(format!("{connections} active"), Style::default().fg(INFO)),
@@ -149,51 +152,65 @@ fn render_services(frame: &mut Frame, area: Rect, services: &[ServiceSnapshot]) 
         .style(Style::default().bg(PANEL))
         .padding(ratatui::widgets::Padding::horizontal(1));
 
+    let inner = panel.inner(area);
+    frame.render_widget(panel, area);
+
     if services.is_empty() {
         let empty = Paragraph::new(Line::from(vec![
             Span::styled("No services running", Style::default().fg(INK)),
             Span::styled("  Waiting for configuration…", Style::default().fg(MUTED)),
         ]))
-        .alignment(Alignment::Center)
-        .block(panel);
-        frame.render_widget(empty, area);
+        .alignment(Alignment::Center);
+        frame.render_widget(empty, inner);
         return;
     }
+
+    let has_errors = services.iter().any(|service| service.last_error.is_some());
+    let show_errors = has_errors && inner.height >= 8;
+    let [table_area, errors_area] = if show_errors {
+        let error_rows = services
+            .iter()
+            .filter(|service| service.last_error.is_some())
+            .count();
+        let error_height = ((error_rows * 2 + 1) as u16).min(8).min(inner.height / 2);
+        Layout::vertical([Constraint::Min(4), Constraint::Length(error_height)]).areas(inner)
+    } else {
+        [inner, Rect::default()]
+    };
 
     let header = Row::new([
         "SERVICE",
         "LOCAL",
         "TARGET",
-        "STATUS",
-        "CONNECTIONS",
+        "LISTENER",
+        "REACHABILITY",
+        "ACTIVE",
         "ACTIVITY",
     ])
     .style(Style::default().fg(MUTED).add_modifier(Modifier::BOLD))
     .height(2);
 
     let rows = services.iter().map(|service| {
-        let (label, color) = status_style(service.status);
-        let status = Line::from(vec![
-            Span::styled("● ", Style::default().fg(color)),
-            Span::styled(label, Style::default().fg(color)),
+        let (listener_label, listener_color) = listener_style(service.listener_status);
+        let listener = Line::from(vec![
+            Span::styled("● ", Style::default().fg(listener_color)),
+            Span::styled(listener_label, Style::default().fg(listener_color)),
         ]);
-        let error = service
-            .last_error
-            .as_deref()
-            .map(|error| format!("  ·  {error}"))
-            .unwrap_or_default();
+        let (target_label, target_color) = target_style(service.target_status);
+        let target_status = Line::from(vec![
+            Span::styled("● ", Style::default().fg(target_color)),
+            Span::styled(target_label, Style::default().fg(target_color)),
+        ]);
 
         Row::new([
             Cell::from(service.name.clone())
                 .style(Style::default().fg(INK).add_modifier(Modifier::BOLD)),
             Cell::from(service.local_address.to_string()).style(Style::default().fg(INK)),
-            Cell::from(Line::from(vec![
-                Span::styled(service.target.clone(), Style::default().fg(INK)),
-                Span::styled(error, Style::default().fg(WARNING)),
-            ])),
-            Cell::from(status),
+            Cell::from(service.target.clone()).style(Style::default().fg(INK)),
+            Cell::from(listener),
+            Cell::from(target_status),
             Cell::from(service.active_connections.to_string()).style(Style::default().fg(INFO)),
-            Cell::from(format_age(service.status_age)).style(Style::default().fg(MUTED)),
+            Cell::from(format_age(service.target_status_age)).style(Style::default().fg(MUTED)),
         ])
         .height(2)
     });
@@ -204,16 +221,45 @@ fn render_services(frame: &mut Frame, area: Rect, services: &[ServiceSnapshot]) 
             Constraint::Length(16),
             Constraint::Length(22),
             Constraint::Min(24),
-            Constraint::Length(13),
-            Constraint::Length(13),
+            Constraint::Length(12),
+            Constraint::Length(14),
+            Constraint::Length(8),
             Constraint::Length(9),
         ],
     )
     .header(header)
-    .column_spacing(2)
-    .block(panel);
+    .column_spacing(2);
 
-    frame.render_widget(table, area);
+    frame.render_widget(table, table_area);
+
+    if show_errors {
+        render_errors(frame, errors_area, services);
+    }
+}
+
+fn render_errors(frame: &mut Frame, area: Rect, services: &[ServiceSnapshot]) {
+    let mut lines = vec![Line::from(Span::styled(
+        "Latest probe errors",
+        Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
+    ))];
+
+    for service in services {
+        let Some(error) = service.last_error.as_deref() else {
+            continue;
+        };
+        lines.push(Line::from(vec![
+            Span::styled(service.name.clone(), Style::default().fg(INK)),
+            Span::styled("  ", Style::default()),
+            Span::styled(service.target.clone(), Style::default().fg(MUTED)),
+        ]));
+        lines.push(Line::from(Span::styled(
+            error,
+            Style::default().fg(WARNING),
+        )));
+    }
+
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, shutdown_requested: bool) {
@@ -257,13 +303,19 @@ fn render_too_small(frame: &mut Frame, area: Rect) {
     frame.render_widget(message, area);
 }
 
-fn status_style(status: ServiceStatus) -> (&'static str, Color) {
+fn listener_style(status: ListenerStatus) -> (&'static str, Color) {
     match status {
-        ServiceStatus::Listening => ("Listening", MUTED),
-        ServiceStatus::Connecting => ("Connecting", INFO),
-        ServiceStatus::Up => ("Last up", SUCCESS),
-        ServiceStatus::Retrying => ("Retrying", WARNING),
-        ServiceStatus::Draining => ("Draining", MUTED),
+        ListenerStatus::Listening => ("Listening", SUCCESS),
+        ListenerStatus::Draining => ("Draining", MUTED),
+    }
+}
+
+fn target_style(status: TargetStatus) -> (&'static str, Color) {
+    match status {
+        TargetStatus::Unknown => ("Unknown", MUTED),
+        TargetStatus::Probing => ("Probing", INFO),
+        TargetStatus::Reachable => ("Reachable", SUCCESS),
+        TargetStatus::Unreachable => ("Unreachable", WARNING),
     }
 }
 
@@ -305,5 +357,30 @@ mod tests {
         assert!(rendered.contains("api"));
         assert!(rendered.contains("127.0.0.1:8080"));
         assert!(rendered.contains("Listening"));
+    }
+
+    #[test]
+    fn dashboard_renders_long_probe_errors_in_full_width_section() {
+        let health = HealthRegistry::default();
+        let service = health.register(
+            "demo".to_string(),
+            "[::1]:9000".parse().unwrap(),
+            "docker://tunl-demo:8000".to_string(),
+        );
+        service.mark_target_unreachable(&anyhow::anyhow!(
+            "cannot reach the Docker daemon - is it running? (on macOS, start Docker Desktop)"
+        ));
+
+        let mut terminal = Terminal::new(TestBackend::new(150, 24)).unwrap();
+        let snapshots = health.snapshots();
+
+        terminal
+            .draw(|frame| render(frame, &snapshots, false))
+            .unwrap();
+
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("Latest probe errors"));
+        assert!(rendered.contains("cannot reach the Docker daemon"));
+        assert!(rendered.contains("start Docker Desktop"));
     }
 }

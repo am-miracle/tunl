@@ -8,7 +8,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use crate::config::ConnectionPolicy;
+use crate::config::{ConnectionPolicy, HealthPolicy};
 use crate::health::{HealthRegistry, ServiceHealth};
 use crate::target::Target;
 
@@ -24,7 +24,8 @@ struct ActiveEntry {
     address: SocketAddr,
     health: ServiceHealth,
     // Paired with the Receiver tunnel::run samples per connection; see update_policy.
-    policy: watch::Sender<ConnectionPolicy>,
+    connection_policy: watch::Sender<ConnectionPolicy>,
+    health_policy: watch::Sender<HealthPolicy>,
 }
 
 struct RetiringEntry {
@@ -80,6 +81,7 @@ impl Registry {
         target: Arc<dyn Target>,
         listener: TcpListener,
         connection: ConnectionPolicy,
+        health_policy: HealthPolicy,
     ) {
         let token = self.root.child_token();
         let run_token = token.clone();
@@ -89,14 +91,16 @@ impl Registry {
             .register(name.clone(), address, target.describe());
         let run_health = service_health.clone();
         let task_health = service_health.clone();
-        let (policy_tx, policy_rx) = watch::channel(connection);
+        let (connection_tx, connection_rx) = watch::channel(connection);
+        let (health_tx, health_rx) = watch::channel(health_policy);
 
         self.tasks.spawn(async move {
             crate::tunnel::run(
                 run_name.clone(),
                 target,
                 listener,
-                policy_rx,
+                connection_rx,
+                health_rx,
                 run_health,
                 run_token,
             )
@@ -113,7 +117,8 @@ impl Registry {
                 token,
                 address,
                 health: service_health,
-                policy: policy_tx,
+                connection_policy: connection_tx,
+                health_policy: health_tx,
             },
         );
     }
@@ -127,6 +132,7 @@ impl Registry {
         address: SocketAddr,
         target: Arc<dyn Target>,
         connection: ConnectionPolicy,
+        health_policy: HealthPolicy,
     ) -> anyhow::Result<()> {
         self.await_port_free(address.port()).await;
 
@@ -134,19 +140,26 @@ impl Registry {
             .await
             .map_err(|e| anyhow::anyhow!("[{name}] failed to bind {address}: {e}"))?;
 
-        self.adopt(name, address, target, listener, connection);
+        self.adopt(name, address, target, listener, connection, health_policy);
         Ok(())
     }
 
-    /// Push a new policy into a running service without restarting it.
+    /// Push new policies into a running service without restarting it.
     /// Existing connections keep the policy they started with; new
-    /// connections accepted after this call see the update. Returns `false`
+    /// connections accepted after this call see the update. The probe loop
+    /// observes health policy changes immediately. Returns `false`
     /// if `name` is not currently active.
-    pub fn update_policy(&mut self, name: &str, connection: ConnectionPolicy) -> bool {
+    pub fn update_policy(
+        &mut self,
+        name: &str,
+        connection: ConnectionPolicy,
+        health: HealthPolicy,
+    ) -> bool {
         let Some(entry) = self.active.get(name) else {
             return false;
         };
-        entry.policy.send_replace(connection);
+        entry.connection_policy.send_replace(connection);
+        entry.health_policy.send_replace(health);
         true
     }
 

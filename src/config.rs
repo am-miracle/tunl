@@ -17,6 +17,8 @@ pub struct Service {
     pub allow_remote_connections: bool,
     #[serde(default)]
     pub connection: ConnectionPolicy,
+    #[serde(default)]
+    pub health: HealthPolicy,
     pub target: String,
 }
 
@@ -41,6 +43,30 @@ impl Default for ConnectionPolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HealthPolicy {
+    #[serde(default = "default_probe_interval", with = "humantime_serde")]
+    pub probe_interval: Duration,
+    #[serde(default = "default_probe_timeout", with = "humantime_serde")]
+    pub probe_timeout: Duration,
+    #[serde(default = "default_probe_backoff_initial", with = "humantime_serde")]
+    pub probe_backoff_initial: Duration,
+    #[serde(default = "default_probe_backoff_max", with = "humantime_serde")]
+    pub probe_backoff_max: Duration,
+}
+
+impl Default for HealthPolicy {
+    fn default() -> Self {
+        Self {
+            probe_interval: default_probe_interval(),
+            probe_timeout: default_probe_timeout(),
+            probe_backoff_initial: default_probe_backoff_initial(),
+            probe_backoff_max: default_probe_backoff_max(),
+        }
+    }
+}
+
 fn default_bind_address() -> IpAddr {
     IpAddr::V4(Ipv4Addr::LOCALHOST)
 }
@@ -55,6 +81,22 @@ fn default_backoff_initial() -> Duration {
 
 fn default_backoff_max() -> Duration {
     Duration::from_secs(15)
+}
+
+fn default_probe_interval() -> Duration {
+    Duration::from_secs(5)
+}
+
+fn default_probe_timeout() -> Duration {
+    Duration::from_secs(2)
+}
+
+fn default_probe_backoff_initial() -> Duration {
+    Duration::from_secs(1)
+}
+
+fn default_probe_backoff_max() -> Duration {
+    Duration::from_secs(30)
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -96,12 +138,48 @@ impl Config {
                 });
             }
             validate_connection_policy(name, service.connection)?;
+            validate_health_policy(name, service.health)?;
         }
 
         check_duplicate_ports(&self.services)?;
 
         Ok(())
     }
+}
+
+fn validate_health_policy(service: &str, policy: HealthPolicy) -> Result<()> {
+    if policy.probe_interval.is_zero() {
+        return Err(Error::InvalidHealthPolicy {
+            service: service.to_string(),
+            reason: "probe_interval must be greater than 0".to_string(),
+        });
+    }
+    if policy.probe_timeout.is_zero() {
+        return Err(Error::InvalidHealthPolicy {
+            service: service.to_string(),
+            reason: "probe_timeout must be greater than 0".to_string(),
+        });
+    }
+    if policy.probe_backoff_initial.is_zero() {
+        return Err(Error::InvalidHealthPolicy {
+            service: service.to_string(),
+            reason: "probe_backoff_initial must be greater than 0".to_string(),
+        });
+    }
+    if policy.probe_backoff_max.is_zero() {
+        return Err(Error::InvalidHealthPolicy {
+            service: service.to_string(),
+            reason: "probe_backoff_max must be greater than 0".to_string(),
+        });
+    }
+    if policy.probe_backoff_initial > policy.probe_backoff_max {
+        return Err(Error::InvalidHealthPolicy {
+            service: service.to_string(),
+            reason: "probe_backoff_initial must be less than or equal to probe_backoff_max"
+                .to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn validate_connection_policy(service: &str, policy: ConnectionPolicy) -> Result<()> {

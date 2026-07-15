@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -6,8 +7,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tunl::backoff::Backoff;
-use tunl::config::ConnectionPolicy;
-use tunl::health::{HealthRegistry, ServiceHealth};
+use tunl::config::{ConnectionPolicy, HealthPolicy};
+use tunl::health::{HealthRegistry, ServiceHealth, TargetStatus};
 use tunl::io::AsyncReadWrite;
 use tunl::target::Target;
 
@@ -21,6 +22,43 @@ impl FakeTarget {
         Arc::new(Self {
             failures_left: Mutex::new(failures),
         })
+    }
+}
+
+#[derive(Debug)]
+struct ProbeTarget {
+    reachable: AtomicBool,
+}
+
+impl ProbeTarget {
+    fn new(reachable: bool) -> Arc<Self> {
+        Arc::new(Self {
+            reachable: AtomicBool::new(reachable),
+        })
+    }
+
+    fn set_reachable(&self, reachable: bool) {
+        self.reachable.store(reachable, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl Target for ProbeTarget {
+    async fn connect(&self) -> anyhow::Result<Box<dyn AsyncReadWrite>> {
+        let (_local, remote) = tokio::io::duplex(4096);
+        Ok(Box::new(remote))
+    }
+
+    async fn probe(&self) -> anyhow::Result<()> {
+        if self.reachable.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            anyhow::bail!("probe failed");
+        }
+    }
+
+    fn describe(&self) -> String {
+        "fake://probe".to_string()
     }
 }
 
@@ -47,6 +85,10 @@ impl Target for FakeTarget {
     fn describe(&self) -> String {
         "fake://target".to_string()
     }
+
+    async fn probe(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 fn service_health(port: u16) -> ServiceHealth {
@@ -66,11 +108,14 @@ async fn spawn_tunnel_with_policy(
     let token = CancellationToken::new();
     let target: Arc<dyn Target> = target;
     let (_policy_tx, policy_rx) = tokio::sync::watch::channel(connection);
+    let (_health_policy_tx, health_policy_rx) =
+        tokio::sync::watch::channel(HealthPolicy::default());
     tokio::spawn(tunl::tunnel::run(
         "test".to_string(),
         target,
         listener,
         policy_rx,
+        health_policy_rx,
         service_health(port),
         token.child_token(),
     ));
@@ -79,6 +124,19 @@ async fn spawn_tunnel_with_policy(
 
 async fn spawn_tunnel(target: Arc<FakeTarget>) -> (u16, CancellationToken) {
     spawn_tunnel_with_policy(target, ConnectionPolicy::default()).await
+}
+
+async fn wait_for_target_status(health: &ServiceHealth, status: TargetStatus) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if health.snapshot().target_status == status {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("target status did not become {status:?}"));
 }
 
 #[test]
@@ -140,12 +198,15 @@ async fn tunnel_accept_loop_stops_on_cancel() {
     let token = CancellationToken::new();
     let target: Arc<dyn Target> = FakeTarget::new(usize::MAX);
     let (_policy_tx, policy_rx) = tokio::sync::watch::channel(ConnectionPolicy::default());
+    let (_health_policy_tx, health_policy_rx) =
+        tokio::sync::watch::channel(HealthPolicy::default());
 
     let handle = tokio::spawn(tunl::tunnel::run(
         "test".to_string(),
         target,
         listener,
         policy_rx,
+        health_policy_rx,
         service_health(port),
         token.child_token(),
     ));
@@ -180,6 +241,44 @@ async fn custom_backoff_policy_is_used_for_retries() {
     })
     .await
     .expect("custom retry policy was not applied");
+}
+
+#[tokio::test]
+async fn probe_loop_updates_target_reachability_without_client_connections() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let token = CancellationToken::new();
+    let target = ProbeTarget::new(false);
+    let health = service_health(port);
+    let target_for_task: Arc<dyn Target> = target.clone();
+    let (_policy_tx, policy_rx) = tokio::sync::watch::channel(ConnectionPolicy::default());
+    let health_policy = HealthPolicy {
+        probe_interval: Duration::from_millis(20),
+        probe_timeout: Duration::from_millis(20),
+        probe_backoff_initial: Duration::from_millis(10),
+        probe_backoff_max: Duration::from_millis(10),
+    };
+    let (_health_policy_tx, health_policy_rx) = tokio::sync::watch::channel(health_policy);
+
+    let handle = tokio::spawn(tunl::tunnel::run(
+        "test".to_string(),
+        target_for_task,
+        listener,
+        policy_rx,
+        health_policy_rx,
+        health.clone(),
+        token.child_token(),
+    ));
+
+    wait_for_target_status(&health, TargetStatus::Unreachable).await;
+    target.set_reachable(true);
+    wait_for_target_status(&health, TargetStatus::Reachable).await;
+
+    token.cancel();
+    tokio::time::timeout(Duration::from_secs(1), handle)
+        .await
+        .expect("tunnel task did not exit")
+        .expect("tunnel task panicked");
 }
 
 #[tokio::test]

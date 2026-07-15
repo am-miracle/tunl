@@ -12,6 +12,16 @@ use crate::io::AsyncReadWrite;
 pub trait Target: Send + Sync + std::fmt::Debug {
     /// open a bidirectional byte stream to the real service
     async fn connect(&self) -> anyhow::Result<Box<dyn AsyncReadWrite>>;
+
+    /// Check whether the target is reachable without carrying user traffic.
+    ///
+    /// Most targets can use the same setup path as a real connection and then
+    /// drop it immediately. Implementations may override this when they have a
+    /// cheaper check with equivalent reachability semantics.
+    async fn probe(&self) -> anyhow::Result<()> {
+        self.connect().await.map(drop)
+    }
+
     fn describe(&self) -> String;
 }
 

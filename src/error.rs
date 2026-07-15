@@ -42,6 +42,9 @@ pub enum Error {
     #[error("[{service}] connection settings are invalid: {reason}")]
     InvalidConnectionPolicy { service: String, reason: String },
 
+    #[error("[{service}] health settings are invalid: {reason}")]
+    InvalidHealthPolicy { service: String, reason: String },
+
     // {target:?} instead of {target} so the value gets wrapped in quotes,
     // making it clear where the URI starts and ends in the message.
     #[error(

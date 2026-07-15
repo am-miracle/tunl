@@ -6,7 +6,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tunl::config::ConnectionPolicy;
+use tunl::config::{ConnectionPolicy, HealthPolicy};
 use tunl::health::HealthRegistry;
 use tunl::io::AsyncReadWrite;
 use tunl::registry::{ExitReason, Registry};
@@ -41,6 +41,10 @@ impl Target for EchoTarget {
 
     fn describe(&self) -> String {
         "fake://echo".to_string()
+    }
+
+    async fn probe(&self) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 
@@ -85,6 +89,10 @@ impl Target for FlakyTarget {
     fn describe(&self) -> String {
         "fake://flaky".to_string()
     }
+
+    async fn probe(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 fn localhost(port: u16) -> SocketAddr {
@@ -109,6 +117,7 @@ async fn start_serves_traffic_and_stop_drains_it() {
             localhost(port),
             echo(),
             ConnectionPolicy::default(),
+            HealthPolicy::default(),
         )
         .await
         .unwrap();
@@ -137,6 +146,7 @@ async fn restarting_a_service_on_the_same_port_does_not_race_the_old_listener() 
             localhost(port),
             echo(),
             ConnectionPolicy::default(),
+            HealthPolicy::default(),
         )
         .await
         .unwrap();
@@ -151,6 +161,7 @@ async fn restarting_a_service_on_the_same_port_does_not_race_the_old_listener() 
             localhost(port),
             echo(),
             ConnectionPolicy::default(),
+            HealthPolicy::default(),
         )
         .await
         .unwrap();
@@ -170,6 +181,7 @@ async fn independent_services_do_not_affect_each_other() {
             localhost(port_a),
             echo(),
             ConnectionPolicy::default(),
+            HealthPolicy::default(),
         )
         .await
         .unwrap();
@@ -179,6 +191,7 @@ async fn independent_services_do_not_affect_each_other() {
             localhost(port_b),
             echo(),
             ConnectionPolicy::default(),
+            HealthPolicy::default(),
         )
         .await
         .unwrap();
@@ -204,6 +217,7 @@ async fn cancel_all_drains_every_service() {
             localhost(port_a),
             echo(),
             ConnectionPolicy::default(),
+            HealthPolicy::default(),
         )
         .await
         .unwrap();
@@ -213,6 +227,7 @@ async fn cancel_all_drains_every_service() {
             localhost(port_b),
             echo(),
             ConnectionPolicy::default(),
+            HealthPolicy::default(),
         )
         .await
         .unwrap();
@@ -248,6 +263,7 @@ async fn update_policy_applies_to_new_connections_without_restarting() {
             localhost(port),
             FlakyTarget::new(1),
             slow,
+            HealthPolicy::default(),
         )
         .await
         .unwrap();
@@ -257,7 +273,7 @@ async fn update_policy_applies_to_new_connections_without_restarting() {
         backoff_initial: Duration::from_millis(10),
         backoff_max: Duration::from_millis(10),
     };
-    assert!(registry.update_policy("svc", fast));
+    assert!(registry.update_policy("svc", fast, HealthPolicy::default()));
 
     tokio::time::timeout(Duration::from_millis(500), round_trip(port))
         .await
@@ -270,7 +286,11 @@ async fn update_policy_applies_to_new_connections_without_restarting() {
 #[tokio::test]
 async fn update_policy_returns_false_for_an_unknown_service() {
     let mut registry = Registry::new();
-    assert!(!registry.update_policy("does-not-exist", ConnectionPolicy::default()));
+    assert!(!registry.update_policy(
+        "does-not-exist",
+        ConnectionPolicy::default(),
+        HealthPolicy::default()
+    ));
 }
 
 #[tokio::test]
@@ -286,6 +306,7 @@ async fn rapid_same_name_restarts_track_each_retiring_generation() {
             localhost(first_port),
             echo(),
             ConnectionPolicy::default(),
+            HealthPolicy::default(),
         )
         .await
         .unwrap();
@@ -297,6 +318,7 @@ async fn rapid_same_name_restarts_track_each_retiring_generation() {
             localhost(second_port),
             echo(),
             ConnectionPolicy::default(),
+            HealthPolicy::default(),
         )
         .await
         .unwrap();

@@ -39,6 +39,7 @@ fn requires_restart(old: &Service, new: &Service) -> bool {
         allow_remote_connections,
         target,
         connection: _, // tuning: read per-connection, applied live instead
+        health: _,     // tuning: read by probe loop, applied live instead
     } = old;
     *local_port != new.local_port
         || *bind_address != new.bind_address
@@ -148,7 +149,7 @@ async fn apply_plan(
 }
 
 /// A name only reaches `policy_updated` because it's unchanged (aside from
-/// `connection`) in both configs, so the registry should already have it
+/// live tuning policy) in both configs, so the registry should already have it
 /// active. Falls back to a full restart if that invariant is ever wrong,
 /// since silently dropping the edit would be worse than a brief restart.
 async fn update_policy_one(
@@ -160,7 +161,7 @@ async fn update_policy_one(
         return false;
     };
 
-    if registry.update_policy(name, service.connection) {
+    if registry.update_policy(name, service.connection, service.health) {
         info!(service = %name, "service_policy_updated");
         return true;
     }
@@ -195,7 +196,13 @@ async fn start_one(
         warn!(service = %name, %address, "remote_listener_enabled");
     }
     match registry
-        .start(name.to_string(), address, target, service.connection)
+        .start(
+            name.to_string(),
+            address,
+            target,
+            service.connection,
+            service.health,
+        )
         .await
     {
         Ok(()) if is_restart => {
@@ -223,6 +230,7 @@ mod tests {
             bind_address: "127.0.0.1".parse().unwrap(),
             allow_remote_connections: false,
             connection: crate::config::ConnectionPolicy::default(),
+            health: crate::config::HealthPolicy::default(),
             target: target.to_string(),
         }
     }
@@ -426,6 +434,7 @@ mod tests {
             target,
             listener,
             crate::config::ConnectionPolicy::default(),
+            crate::config::HealthPolicy::default(),
         );
 
         let mut current = HashMap::new();
@@ -485,6 +494,7 @@ mod tests {
             target_a,
             listener_a,
             crate::config::ConnectionPolicy::default(),
+            crate::config::HealthPolicy::default(),
         );
 
         let listener_b = tokio::net::TcpListener::bind(("127.0.0.1", port_b))
@@ -498,6 +508,7 @@ mod tests {
             target_b,
             listener_b,
             crate::config::ConnectionPolicy::default(),
+            crate::config::HealthPolicy::default(),
         );
 
         let mut current = HashMap::new();
@@ -550,6 +561,10 @@ mod tests {
         fn describe(&self) -> String {
             "fake://echo".to_string()
         }
+
+        async fn probe(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     #[tokio::test]
@@ -571,6 +586,7 @@ mod tests {
             target,
             listener,
             crate::config::ConnectionPolicy::default(),
+            crate::config::HealthPolicy::default(),
         );
 
         let mut client = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
@@ -596,5 +612,20 @@ mod tests {
         client.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"pong");
         assert_eq!(registry.task_count(), 1);
+    }
+
+    #[test]
+    fn health_policy_change_does_not_require_restart() {
+        let mut old = HashMap::new();
+        old.insert("api".to_string(), svc(8080, "remote://api.internal:8080"));
+
+        let mut edited = svc(8080, "remote://api.internal:8080");
+        edited.health.probe_interval = std::time::Duration::from_secs(1);
+        let mut new = HashMap::new();
+        new.insert("api".to_string(), edited);
+
+        let plan = diff(&old, &new);
+        assert_eq!(plan.policy_updated, vec!["api".to_string()]);
+        assert!(plan.changed.is_empty());
     }
 }

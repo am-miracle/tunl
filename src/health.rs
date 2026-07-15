@@ -13,15 +13,32 @@ pub enum ServiceStatus {
     Draining,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListenerStatus {
+    Listening,
+    Draining,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetStatus {
+    Unknown,
+    Probing,
+    Reachable,
+    Unreachable,
+}
+
 #[derive(Debug, Clone)]
 pub struct ServiceSnapshot {
     pub name: String,
     pub local_address: SocketAddr,
     pub target: String,
     pub status: ServiceStatus,
+    pub listener_status: ListenerStatus,
+    pub target_status: TargetStatus,
     pub active_connections: usize,
     pub last_error: Option<String>,
     pub status_age: Duration,
+    pub target_status_age: Duration,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -46,8 +63,10 @@ impl HealthRegistry {
                 retrying: 0,
                 active_connections: 0,
                 has_connected: false,
+                target_status: TargetProbeState::Unknown,
                 last_error: None,
                 updated_at: Instant::now(),
+                target_updated_at: Instant::now(),
             })),
         };
         lock(&self.services).insert(name, health.clone());
@@ -102,6 +121,28 @@ impl ServiceHealth {
         state.updated_at = Instant::now();
     }
 
+    pub fn mark_target_probing(&self) {
+        let mut state = lock(&self.inner);
+        state.target_status = TargetProbeState::Probing;
+        state.target_updated_at = Instant::now();
+    }
+
+    pub fn mark_target_reachable(&self) {
+        let mut state = lock(&self.inner);
+        state.target_status = TargetProbeState::Reachable;
+        state.last_error = None;
+        state.target_updated_at = Instant::now();
+        state.updated_at = Instant::now();
+    }
+
+    pub fn mark_target_unreachable(&self, error: &anyhow::Error) {
+        let mut state = lock(&self.inner);
+        state.target_status = TargetProbeState::Unreachable;
+        state.last_error = Some(error.to_string());
+        state.target_updated_at = Instant::now();
+        state.updated_at = Instant::now();
+    }
+
     pub fn snapshot(&self) -> ServiceSnapshot {
         let state = lock(&self.inner);
         ServiceSnapshot {
@@ -109,9 +150,12 @@ impl ServiceHealth {
             local_address: state.local_address,
             target: state.target.clone(),
             status: state.status(),
+            listener_status: state.listener_status(),
+            target_status: state.target_status(),
             active_connections: state.active_connections,
             last_error: state.last_error.clone(),
             status_age: state.updated_at.elapsed(),
+            target_status_age: state.target_updated_at.elapsed(),
         }
     }
 }
@@ -148,6 +192,8 @@ impl ConnectionHealth {
         if let Some(error) = error {
             state.last_error = Some(error);
         } else if next == ConnectionPhase::Up && state.retrying == 0 {
+            state.target_status = TargetProbeState::Reachable;
+            state.target_updated_at = Instant::now();
             state.last_error = None;
         }
         state.updated_at = Instant::now();
@@ -160,7 +206,7 @@ impl Drop for ConnectionHealth {
         let mut state = lock(&self.service.inner);
         state.leave(self.phase);
         state.active_connections = state.active_connections.saturating_sub(1);
-        if state.retrying == 0 {
+        if state.retrying == 0 && state.target_status != TargetProbeState::Unreachable {
             state.last_error = None;
         }
         state.updated_at = Instant::now();
@@ -177,8 +223,10 @@ struct ServiceState {
     retrying: usize,
     active_connections: usize,
     has_connected: bool,
+    target_status: TargetProbeState,
     last_error: Option<String>,
     updated_at: Instant,
+    target_updated_at: Instant,
 }
 
 impl ServiceState {
@@ -193,6 +241,22 @@ impl ServiceState {
             ServiceStatus::Connecting
         } else {
             ServiceStatus::Listening
+        }
+    }
+
+    fn listener_status(&self) -> ListenerStatus {
+        match self.lifecycle {
+            Lifecycle::Listening => ListenerStatus::Listening,
+            Lifecycle::Draining => ListenerStatus::Draining,
+        }
+    }
+
+    fn target_status(&self) -> TargetStatus {
+        match self.target_status {
+            TargetProbeState::Unknown => TargetStatus::Unknown,
+            TargetProbeState::Probing => TargetStatus::Probing,
+            TargetProbeState::Reachable => TargetStatus::Reachable,
+            TargetProbeState::Unreachable => TargetStatus::Unreachable,
         }
     }
 
@@ -227,6 +291,14 @@ enum ConnectionPhase {
     Up,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetProbeState {
+    Unknown,
+    Probing,
+    Reachable,
+    Unreachable,
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
@@ -250,6 +322,11 @@ mod tests {
         let registry = HealthRegistry::default();
         let service = service(&registry);
         assert_eq!(service.snapshot().status, ServiceStatus::Listening);
+        assert_eq!(
+            service.snapshot().listener_status,
+            ListenerStatus::Listening
+        );
+        assert_eq!(service.snapshot().target_status, TargetStatus::Unknown);
 
         let mut connection = service.connection();
         assert_eq!(service.snapshot().status, ServiceStatus::Connecting);
@@ -265,6 +342,7 @@ mod tests {
         connection.mark_connecting();
         connection.mark_up();
         assert_eq!(service.snapshot().status, ServiceStatus::Up);
+        assert_eq!(service.snapshot().target_status, TargetStatus::Reachable);
         assert!(service.snapshot().last_error.is_none());
 
         drop(connection);
@@ -293,5 +371,31 @@ mod tests {
         let _connection = service.connection();
         service.mark_draining();
         assert_eq!(service.snapshot().status, ServiceStatus::Draining);
+        assert_eq!(service.snapshot().listener_status, ListenerStatus::Draining);
+    }
+
+    #[test]
+    fn target_reachability_is_tracked_separately_from_listener_status() {
+        let registry = HealthRegistry::default();
+        let service = service(&registry);
+
+        service.mark_target_probing();
+        assert_eq!(
+            service.snapshot().listener_status,
+            ListenerStatus::Listening
+        );
+        assert_eq!(service.snapshot().target_status, TargetStatus::Probing);
+
+        service.mark_target_unreachable(&anyhow::anyhow!("connection refused"));
+        let snapshot = service.snapshot();
+        assert_eq!(snapshot.listener_status, ListenerStatus::Listening);
+        assert_eq!(snapshot.target_status, TargetStatus::Unreachable);
+        assert_eq!(snapshot.last_error.as_deref(), Some("connection refused"));
+
+        service.mark_target_reachable();
+        let snapshot = service.snapshot();
+        assert_eq!(snapshot.listener_status, ListenerStatus::Listening);
+        assert_eq!(snapshot.target_status, TargetStatus::Reachable);
+        assert!(snapshot.last_error.is_none());
     }
 }

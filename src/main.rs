@@ -110,6 +110,7 @@ async fn initial_start(
         address: SocketAddr,
         target: Box<dyn Target>,
         connection: tunl::config::ConnectionPolicy,
+        health: tunl::config::HealthPolicy,
     }
 
     struct ReadyService {
@@ -118,6 +119,7 @@ async fn initial_start(
         target: Arc<dyn Target>,
         listener: tokio::net::TcpListener,
         connection: tunl::config::ConnectionPolicy,
+        health: tunl::config::HealthPolicy,
     }
 
     let mut parsed = Vec::with_capacity(services.len());
@@ -132,6 +134,7 @@ async fn initial_start(
             address,
             target,
             connection: service.connection,
+            health: service.health,
         });
     }
 
@@ -147,6 +150,7 @@ async fn initial_start(
             target,
             listener,
             connection: service.connection,
+            health: service.health,
         });
     }
 
@@ -157,6 +161,7 @@ async fn initial_start(
             service.target,
             service.listener,
             service.connection,
+            service.health,
         );
     }
     Ok(())

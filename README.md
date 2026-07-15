@@ -50,11 +50,18 @@ target = "ssh://deploy@bastion.example.com/db.internal:5432"
 connect_timeout = "5s"
 backoff_initial = "500ms"
 backoff_max = "10s"
+
+[services.internal_db.health]
+probe_interval = "5s"
+probe_timeout = "2s"
+probe_backoff_initial = "1s"
+probe_backoff_max = "30s"
 ```
 
 - `local_port` is the port on your machine that `tunl` listens on.
 - `bind_address` is optional and defaults to `127.0.0.1`. Use `::1` for IPv6 loopback.
 - `connection` is optional. Use it when a service needs a different connect timeout or retry backoff.
+- `health` is optional. Use it to tune dashboard target probes independently from client retry behavior.
 - `target` is where that traffic goes, written as a URI.
 
 `0.0.0.0`, `::`, and other non-loopback addresses can expose a tunnel to other machines. Tunl rejects these addresses unless the service acknowledges the exposure:
@@ -97,20 +104,18 @@ curl localhost:8080             # reaches the pod
 
 Press Ctrl+C to stop. `tunl` lets active connections finish, then exits.
 
-Add `--dashboard` for a live terminal view of every service, its target,
-passive connection status, and active connection count. Press `q`, Escape, or
-Ctrl+C to stop:
+Add `--dashboard` for a live terminal view of every service, its listener,
+target reachability, and active connection count. Press `q`, Escape, or Ctrl+C
+to stop:
 
 ```sh
 tunl --config config.toml --dashboard
 ```
 
-`Listening` means the local port is ready but no target connection has
-succeeded yet. `Last up` records the most recent successful target connection,
-while `Connecting` and `Retrying` reflect clients currently waiting for a
-target. The dashboard does not probe idle backends in the background, so an
-idle service that previously connected successfully remains `Last up` until a
-new client attempt observes a failure.
+`Listening` in the listener column means the local port is bound and accepting
+clients. `Reachable`, `Unreachable`, `Probing`, and `Unknown` in the
+reachability column come from the background health probe loop. This makes a
+down backend visible even when no client is currently trying to connect.
 
 Add `--json` for structured logs you can pipe into `jq` or a log collector:
 
@@ -152,6 +157,21 @@ backoff_max = "10s"
 ```
 
 The defaults are `10s`, `1s`, and `15s`. Durations must be greater than zero, and `backoff_initial` must not be higher than `backoff_max`. Very small retry values can put pressure on a failing backend, so use them for local tests rather than shared infrastructure.
+
+Each service can also tune dashboard health probes:
+
+```toml
+[services.api.health]
+probe_interval = "5s"
+probe_timeout = "2s"
+probe_backoff_initial = "1s"
+probe_backoff_max = "30s"
+```
+
+Successful probes wait `probe_interval` before checking again. Failed probes
+retry with exponential backoff from `probe_backoff_initial` to
+`probe_backoff_max`. These values only affect the dashboard's target
+reachability signal; client connection retries still use `[services.api.connection]`.
 
 ## Limitations
 

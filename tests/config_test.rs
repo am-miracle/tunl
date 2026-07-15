@@ -40,6 +40,13 @@ fn valid_config_parses_into_expected_structs() {
     assert_eq!(postgres.connection.connect_timeout, Duration::from_secs(10));
     assert_eq!(postgres.connection.backoff_initial, Duration::from_secs(1));
     assert_eq!(postgres.connection.backoff_max, Duration::from_secs(15));
+    assert_eq!(postgres.health.probe_interval, Duration::from_secs(5));
+    assert_eq!(postgres.health.probe_timeout, Duration::from_secs(2));
+    assert_eq!(
+        postgres.health.probe_backoff_initial,
+        Duration::from_secs(1)
+    );
+    assert_eq!(postgres.health.probe_backoff_max, Duration::from_secs(30));
     assert_eq!(postgres.target, "kubectl://default/postgres-0:5432");
 
     let redis = &config.services["redis"];
@@ -90,6 +97,51 @@ fn accepts_partial_connection_policy_override() {
 }
 
 #[test]
+fn accepts_custom_health_policy() {
+    let file = write_config(
+        r#"
+        [services.api]
+        local_port = 8080
+        target = "remote://api.internal:8080"
+
+        [services.api.health]
+        probe_interval = "250ms"
+        probe_timeout = "100ms"
+        probe_backoff_initial = "500ms"
+        probe_backoff_max = "5s"
+        "#,
+    );
+
+    let config = Config::load(file.path()).expect("custom health policy should load");
+    let policy = config.services["api"].health;
+    assert_eq!(policy.probe_interval, Duration::from_millis(250));
+    assert_eq!(policy.probe_timeout, Duration::from_millis(100));
+    assert_eq!(policy.probe_backoff_initial, Duration::from_millis(500));
+    assert_eq!(policy.probe_backoff_max, Duration::from_secs(5));
+}
+
+#[test]
+fn accepts_partial_health_policy_override() {
+    let file = write_config(
+        r#"
+        [services.api]
+        local_port = 8080
+        target = "remote://api.internal:8080"
+
+        [services.api.health]
+        probe_interval = "1s"
+        "#,
+    );
+
+    let config = Config::load(file.path()).expect("partial health policy should load");
+    let policy = config.services["api"].health;
+    assert_eq!(policy.probe_interval, Duration::from_secs(1));
+    assert_eq!(policy.probe_timeout, Duration::from_secs(2));
+    assert_eq!(policy.probe_backoff_initial, Duration::from_secs(1));
+    assert_eq!(policy.probe_backoff_max, Duration::from_secs(30));
+}
+
+#[test]
 fn rejects_zero_connection_timeout() {
     let file = write_config(
         r#"
@@ -127,6 +179,27 @@ fn rejects_backoff_initial_above_max() {
     assert_eq!(
         err.to_string(),
         "[api] connection settings are invalid: backoff_initial must be less than or equal to backoff_max"
+    );
+}
+
+#[test]
+fn rejects_probe_backoff_initial_above_max() {
+    let file = write_config(
+        r#"
+        [services.api]
+        local_port = 8080
+        target = "remote://api.internal:8080"
+
+        [services.api.health]
+        probe_backoff_initial = "5s"
+        probe_backoff_max = "1s"
+        "#,
+    );
+
+    let err = Config::load(file.path()).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "[api] health settings are invalid: probe_backoff_initial must be less than or equal to probe_backoff_max"
     );
 }
 
@@ -203,6 +276,26 @@ fn rejects_unknown_connection_policy_field() {
     let err = Config::load(file.path()).unwrap_err();
     assert!(
         err.to_string().contains("unknown field `backoff_intial`"),
+        "unexpected error message: {err}"
+    );
+}
+
+#[test]
+fn rejects_unknown_health_policy_field() {
+    let file = write_config(
+        r#"
+        [services.api]
+        local_port = 8080
+        target = "remote://api.internal:8080"
+
+        [services.api.health]
+        probe_intervl = "30s"
+        "#,
+    );
+
+    let err = Config::load(file.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("unknown field `probe_intervl`"),
         "unexpected error message: {err}"
     );
 }

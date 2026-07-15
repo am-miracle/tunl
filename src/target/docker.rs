@@ -7,6 +7,7 @@ use bollard::errors::Error as BollardError;
 use bollard::exec::{CreateExecOptions, StartExecResults};
 use futures_util::StreamExt;
 use tokio_util::io::StreamReader;
+use tracing::debug;
 
 use crate::io::AsyncReadWrite;
 
@@ -31,9 +32,13 @@ pub struct DockerTarget {
 #[async_trait]
 impl Target for DockerTarget {
     async fn connect(&self) -> anyhow::Result<Box<dyn AsyncReadWrite>> {
+        let container = &self.container;
+        debug!(container = %container, "docker_connect_with_local_defaults_started");
         let docker = Docker::connect_with_local_defaults().map_err(|e| self.explain(e))?;
+        debug!(container = %container, "docker_connect_with_local_defaults_done");
 
         let port = self.port.to_string();
+        debug!(container = %container, port = %port, "docker_create_exec_started");
         let exec = docker
             .create_exec(
                 &self.container,
@@ -46,11 +51,14 @@ impl Target for DockerTarget {
             )
             .await
             .map_err(|e| self.explain(e))?;
+        debug!(container = %container, exec_id = %exec.id, "docker_create_exec_done");
 
+        debug!(container = %container, exec_id = %exec.id, "docker_start_exec_started");
         let started = docker
             .start_exec(&exec.id, None)
             .await
             .map_err(|e| self.explain(e))?;
+        debug!(container = %container, exec_id = %exec.id, "docker_start_exec_done");
 
         match started {
             StartExecResults::Attached { output, input } => {

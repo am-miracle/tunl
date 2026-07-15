@@ -12,6 +12,20 @@ fn real_backends_enabled() -> bool {
     std::env::var_os("TUNL_REAL_BACKENDS").is_some()
 }
 
+/// `cargo test` installs no tracing subscriber by default, so the
+/// `info!`/`warn!` events `tunnel::run` and `DockerTarget::connect` emit are
+/// silently dropped even with `--nocapture`. Install one so a future timeout
+/// shows which step actually stalled instead of just "deadline has elapsed".
+fn init_tracing() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::DEBUG)
+            .try_init();
+    });
+}
+
 fn test_policy() -> ConnectionPolicy {
     ConnectionPolicy {
         connect_timeout: Duration::from_secs(10),
@@ -26,6 +40,8 @@ async fn assert_target_response(
     request: &[u8],
     expected: &str,
 ) -> anyhow::Result<()> {
+    init_tracing();
+
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
 

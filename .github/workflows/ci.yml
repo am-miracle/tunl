@@ -44,6 +44,8 @@ jobs:
           docker rm -f tunl-demo >/dev/null 2>&1 || true
           docker run -d --name tunl-demo busybox \
             sh -c 'while true; do echo "hello from container" | nc -l -p 8000; done'
+          timeout 30s sh -c \
+            'until docker exec tunl-demo nc -z localhost 8000; do sleep 1; done'
       - name: start Kubernetes demo backend
         run: |
           kubectl config use-context kind-tunl-test

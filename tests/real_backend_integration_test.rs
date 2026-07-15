@@ -69,8 +69,24 @@ async fn assert_target_response(
             client.write_all(request).await?;
         }
 
+        // Read incrementally and stop once the expected text shows up rather
+        // than waiting for EOF: not every backend closes the connection
+        // after responding (the Docker demo's raw `nc` listener doesn't,
+        // unlike the Kubernetes demo's http-echo with `Connection: close`),
+        // so requiring EOF here would hang on a backend that already sent
+        // everything we need.
         let mut response = String::new();
-        client.read_to_string(&mut response).await?;
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = client.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            response.push_str(&String::from_utf8_lossy(&buf[..n]));
+            if response.contains(expected) {
+                break;
+            }
+        }
         anyhow::ensure!(
             response.contains(expected),
             "response did not contain {expected:?}: {response:?}"

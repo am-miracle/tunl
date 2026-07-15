@@ -562,8 +562,8 @@ mod tests {
             "fake://echo".to_string()
         }
 
-        async fn probe(&self) -> anyhow::Result<()> {
-            Ok(())
+        async fn probe(&self) -> Option<anyhow::Result<()>> {
+            Some(Ok(()))
         }
     }
 

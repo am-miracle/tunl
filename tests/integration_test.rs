@@ -36,8 +36,6 @@ async fn echo_round_trip() {
 
     let (_policy_tx, policy_rx) =
         tokio::sync::watch::channel(tunl::config::ConnectionPolicy::default());
-    let (_health_policy_tx, health_policy_rx) =
-        tokio::sync::watch::channel(tunl::config::HealthPolicy::default());
     let health = tunl::health::HealthRegistry::default().register(
         "test".to_string(),
         ([127, 0, 0, 1], tunnel_port).into(),
@@ -48,7 +46,7 @@ async fn echo_round_trip() {
         target,
         tunnel_listener,
         policy_rx,
-        health_policy_rx,
+        None,
         health,
         CancellationToken::new(),
     ));

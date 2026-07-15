@@ -13,13 +13,15 @@ pub trait Target: Send + Sync + std::fmt::Debug {
     /// open a bidirectional byte stream to the real service
     async fn connect(&self) -> anyhow::Result<Box<dyn AsyncReadWrite>>;
 
-    /// Check whether the target is reachable without carrying user traffic.
+    /// Check whether the target is reachable without carrying user traffic,
+    /// when the target has a cheap probe path.
     ///
-    /// Most targets can use the same setup path as a real connection and then
-    /// drop it immediately. Implementations may override this when they have a
-    /// cheaper check with equivalent reachability semantics.
-    async fn probe(&self) -> anyhow::Result<()> {
-        self.connect().await.map(drop)
+    /// Returning `None` means this target should stay `Unknown` until real
+    /// client traffic provides evidence. Implementations must not default to
+    /// spawning helper processes, opening Kubernetes port-forwards, or holding
+    /// persistent remote sessions just for dashboard health.
+    async fn probe(&self) -> Option<anyhow::Result<()>> {
+        None
     }
 
     fn describe(&self) -> String;

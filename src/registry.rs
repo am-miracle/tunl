@@ -25,7 +25,7 @@ struct ActiveEntry {
     health: ServiceHealth,
     // Paired with the Receiver tunnel::run samples per connection; see update_policy.
     connection_policy: watch::Sender<ConnectionPolicy>,
-    health_policy: watch::Sender<HealthPolicy>,
+    health_policy: Option<watch::Sender<HealthPolicy>>,
 }
 
 struct RetiringEntry {
@@ -50,6 +50,7 @@ struct TaskExit {
 pub struct Registry {
     root: CancellationToken,
     health: HealthRegistry,
+    active_probes: bool,
     active: HashMap<String, ActiveEntry>,
     retiring: Vec<RetiringEntry>,
     tasks: JoinSet<TaskExit>,
@@ -61,9 +62,19 @@ impl Registry {
     }
 
     pub fn with_health(health: HealthRegistry) -> Self {
+        Self::with_health_probes(health, false)
+    }
+
+    /// Build a registry and opt into active target probes.
+    ///
+    /// Active probes are intended for interactive health consumers such as
+    /// the dashboard. Normal tunnel operation keeps reactive health updates
+    /// from real client connections without generating background traffic.
+    pub fn with_health_probes(health: HealthRegistry, active_probes: bool) -> Self {
         Self {
             root: CancellationToken::new(),
             health,
+            active_probes,
             active: HashMap::new(),
             retiring: Vec::new(),
             tasks: JoinSet::new(),
@@ -92,7 +103,12 @@ impl Registry {
         let run_health = service_health.clone();
         let task_health = service_health.clone();
         let (connection_tx, connection_rx) = watch::channel(connection);
-        let (health_tx, health_rx) = watch::channel(health_policy);
+        let (health_tx, health_rx) = if self.active_probes {
+            let (tx, rx) = watch::channel(health_policy);
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
 
         self.tasks.spawn(async move {
             crate::tunnel::run(
@@ -159,7 +175,9 @@ impl Registry {
             return false;
         };
         entry.connection_policy.send_replace(connection);
-        entry.health_policy.send_replace(health);
+        if let Some(policy) = &entry.health_policy {
+            policy.send_replace(health);
+        }
         true
     }
 

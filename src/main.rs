@@ -37,7 +37,7 @@ async fn run() -> anyhow::Result<()> {
     info!(count = config.services.len(), "loaded_services");
 
     let health = HealthRegistry::default();
-    let mut registry = Registry::with_health(health.clone());
+    let mut registry = Registry::with_health_probes(health.clone(), args.dashboard);
     initial_start(&config.services, &mut registry).await?;
     let mut current_services = config.services;
 

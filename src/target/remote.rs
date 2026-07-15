@@ -19,6 +19,15 @@ impl Target for RemoteTarget {
         Ok(Box::new(stream))
     }
 
+    async fn probe(&self) -> Option<anyhow::Result<()>> {
+        Some(
+            TcpStream::connect(&self.address)
+                .await
+                .map(drop)
+                .map_err(Into::into),
+        )
+    }
+
     fn describe(&self) -> String {
         format!("remote://{}", self.address)
     }

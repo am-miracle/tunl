@@ -127,6 +127,13 @@ impl ServiceHealth {
         state.target_updated_at = Instant::now();
     }
 
+    pub fn mark_target_unknown(&self) {
+        let mut state = lock(&self.inner);
+        state.target_status = TargetProbeState::Unknown;
+        state.last_error = None;
+        state.target_updated_at = Instant::now();
+    }
+
     pub fn mark_target_reachable(&self) {
         let mut state = lock(&self.inner);
         state.target_status = TargetProbeState::Reachable;
@@ -385,6 +392,9 @@ mod tests {
             ListenerStatus::Listening
         );
         assert_eq!(service.snapshot().target_status, TargetStatus::Probing);
+
+        service.mark_target_unknown();
+        assert_eq!(service.snapshot().target_status, TargetStatus::Unknown);
 
         service.mark_target_unreachable(&anyhow::anyhow!("connection refused"));
         let snapshot = service.snapshot();

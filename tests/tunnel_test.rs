@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -28,17 +28,23 @@ impl FakeTarget {
 #[derive(Debug)]
 struct ProbeTarget {
     reachable: AtomicBool,
+    probes: AtomicUsize,
 }
 
 impl ProbeTarget {
     fn new(reachable: bool) -> Arc<Self> {
         Arc::new(Self {
             reachable: AtomicBool::new(reachable),
+            probes: AtomicUsize::new(0),
         })
     }
 
     fn set_reachable(&self, reachable: bool) {
         self.reachable.store(reachable, Ordering::SeqCst);
+    }
+
+    fn probe_count(&self) -> usize {
+        self.probes.load(Ordering::SeqCst)
     }
 }
 
@@ -49,16 +55,39 @@ impl Target for ProbeTarget {
         Ok(Box::new(remote))
     }
 
-    async fn probe(&self) -> anyhow::Result<()> {
+    async fn probe(&self) -> Option<anyhow::Result<()>> {
+        self.probes.fetch_add(1, Ordering::SeqCst);
         if self.reachable.load(Ordering::SeqCst) {
-            Ok(())
+            Some(Ok(()))
         } else {
-            anyhow::bail!("probe failed");
+            Some(Err(anyhow::anyhow!("probe failed")))
         }
     }
 
     fn describe(&self) -> String {
         "fake://probe".to_string()
+    }
+}
+
+#[derive(Debug, Default)]
+struct UnsupportedProbeTarget {
+    probes: AtomicUsize,
+}
+
+#[async_trait]
+impl Target for UnsupportedProbeTarget {
+    async fn connect(&self) -> anyhow::Result<Box<dyn AsyncReadWrite>> {
+        let (_local, remote) = tokio::io::duplex(4096);
+        Ok(Box::new(remote))
+    }
+
+    async fn probe(&self) -> Option<anyhow::Result<()>> {
+        self.probes.fetch_add(1, Ordering::SeqCst);
+        None
+    }
+
+    fn describe(&self) -> String {
+        "fake://unsupported-probe".to_string()
     }
 }
 
@@ -86,8 +115,8 @@ impl Target for FakeTarget {
         "fake://target".to_string()
     }
 
-    async fn probe(&self) -> anyhow::Result<()> {
-        Ok(())
+    async fn probe(&self) -> Option<anyhow::Result<()>> {
+        Some(Ok(()))
     }
 }
 
@@ -115,7 +144,7 @@ async fn spawn_tunnel_with_policy(
         target,
         listener,
         policy_rx,
-        health_policy_rx,
+        Some(health_policy_rx),
         service_health(port),
         token.child_token(),
     ));
@@ -206,7 +235,7 @@ async fn tunnel_accept_loop_stops_on_cancel() {
         target,
         listener,
         policy_rx,
-        health_policy_rx,
+        Some(health_policy_rx),
         service_health(port),
         token.child_token(),
     ));
@@ -265,7 +294,7 @@ async fn probe_loop_updates_target_reachability_without_client_connections() {
         target_for_task,
         listener,
         policy_rx,
-        health_policy_rx,
+        Some(health_policy_rx),
         health.clone(),
         token.child_token(),
     ));
@@ -273,6 +302,69 @@ async fn probe_loop_updates_target_reachability_without_client_connections() {
     wait_for_target_status(&health, TargetStatus::Unreachable).await;
     target.set_reachable(true);
     wait_for_target_status(&health, TargetStatus::Reachable).await;
+
+    token.cancel();
+    tokio::time::timeout(Duration::from_secs(1), handle)
+        .await
+        .expect("tunnel task did not exit")
+        .expect("tunnel task panicked");
+}
+
+#[tokio::test]
+async fn tunnel_without_health_policy_does_not_probe_target() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let token = CancellationToken::new();
+    let target = ProbeTarget::new(true);
+    let target_for_task: Arc<dyn Target> = target.clone();
+    let (_policy_tx, policy_rx) = tokio::sync::watch::channel(ConnectionPolicy::default());
+
+    let handle = tokio::spawn(tunl::tunnel::run(
+        "test".to_string(),
+        target_for_task,
+        listener,
+        policy_rx,
+        None,
+        service_health(port),
+        token.child_token(),
+    ));
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(target.probe_count(), 0);
+
+    token.cancel();
+    tokio::time::timeout(Duration::from_secs(1), handle)
+        .await
+        .expect("tunnel task did not exit")
+        .expect("tunnel task panicked");
+}
+
+#[tokio::test]
+async fn unsupported_target_is_probed_only_once() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let token = CancellationToken::new();
+    let target = Arc::new(UnsupportedProbeTarget::default());
+    let target_for_task: Arc<dyn Target> = target.clone();
+    let (_policy_tx, policy_rx) = tokio::sync::watch::channel(ConnectionPolicy::default());
+    let health_policy = HealthPolicy {
+        probe_interval: Duration::from_millis(10),
+        ..HealthPolicy::default()
+    };
+    let (_health_policy_tx, health_policy_rx) = tokio::sync::watch::channel(health_policy);
+
+    let handle = tokio::spawn(tunl::tunnel::run(
+        "test".to_string(),
+        target_for_task,
+        listener,
+        policy_rx,
+        Some(health_policy_rx),
+        service_health(port),
+        token.child_token(),
+    ));
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(target.probes.load(Ordering::SeqCst), 1);
 
     token.cancel();
     tokio::time::timeout(Duration::from_secs(1), handle)

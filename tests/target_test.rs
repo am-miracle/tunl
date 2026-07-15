@@ -18,6 +18,21 @@ fn docker_parses_and_describes_correctly() {
     assert_eq!(t.describe(), "docker://redis:6379");
 }
 
+#[tokio::test]
+async fn non_remote_targets_do_not_enable_active_probes_by_default() {
+    for uri in [
+        "docker://redis:6379",
+        "kubectl://default/postgres-0:5432",
+        "ssh://deploy@bastion.example.com/db.internal:5432",
+    ] {
+        let target = from_uri("svc", uri).unwrap();
+        assert!(
+            target.probe().await.is_none(),
+            "{uri} unexpectedly opted into active probing"
+        );
+    }
+}
+
 #[test]
 fn kubectl_parses_and_describes_correctly() {
     let t = from_uri("postgres", "kubectl://default/postgres-0:5432").unwrap();

@@ -22,7 +22,7 @@ pub async fn run(
     target: Arc<dyn Target>,
     listener: TcpListener,
     policy: watch::Receiver<ConnectionPolicy>,
-    health_policy: watch::Receiver<HealthPolicy>,
+    health_policy: Option<watch::Receiver<HealthPolicy>>,
     health: ServiceHealth,
     token: CancellationToken,
 ) {
@@ -37,13 +37,15 @@ pub async fn run(
     );
 
     let mut connections: JoinSet<()> = JoinSet::new();
-    let probe = tokio::spawn(probe_target(
-        service.clone(),
-        Arc::clone(&target),
-        health_policy,
-        health.clone(),
-        token.child_token(),
-    ));
+    let probe = health_policy.map(|health_policy| {
+        tokio::spawn(probe_target(
+            service.clone(),
+            Arc::clone(&target),
+            health_policy,
+            health.clone(),
+            token.child_token(),
+        ))
+    });
 
     loop {
         tokio::select! {
@@ -79,7 +81,9 @@ pub async fn run(
 
     // Drain: wait for all active connections to finish their bridge drain window.
     while connections.join_next().await.is_some() {}
-    let _ = probe.await;
+    if let Some(probe) = probe {
+        let _ = probe.await;
+    }
 }
 
 async fn probe_target(
@@ -100,7 +104,12 @@ async fn probe_target(
 
         let result = tokio::time::timeout(current.probe_timeout, target.probe()).await;
         match result {
-            Ok(Ok(())) => {
+            Ok(None) => {
+                health.mark_target_unknown();
+                info!(service = %service, "health_probe_unsupported");
+                return;
+            }
+            Ok(Some(Ok(()))) => {
                 backoff =
                     Backoff::with_base(current.probe_backoff_initial, current.probe_backoff_max);
                 health.mark_target_reachable();
@@ -117,7 +126,7 @@ async fn probe_target(
                     ProbeDelay::Cancelled => return,
                 }
             }
-            Ok(Err(e)) => {
+            Ok(Some(Err(e))) => {
                 let delay = backoff.delay();
                 health.mark_target_unreachable(&e);
                 warn!(

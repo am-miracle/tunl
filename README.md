@@ -114,8 +114,12 @@ tunl --config config.toml --dashboard
 
 `Listening` in the listener column means the local port is bound and accepting
 clients. `Reachable`, `Unreachable`, `Probing`, and `Unknown` in the
-reachability column come from the background health probe loop. This makes a
-down backend visible even when no client is currently trying to connect.
+reachability column come from background health probes where a target has a
+cheap probe path. Today `remote://` targets use active TCP probes. Docker,
+Kubernetes, and SSH targets stay `Unknown` while idle to avoid spawning
+background `docker exec` processes, opening Kubernetes port-forwards, or
+creating SSH audit noise just for the dashboard; real client connection
+attempts still update the reachability signal when they succeed.
 
 Add `--json` for structured logs you can pipe into `jq` or a log collector:
 
@@ -158,7 +162,10 @@ backoff_max = "10s"
 
 The defaults are `10s`, `1s`, and `15s`. Durations must be greater than zero, and `backoff_initial` must not be higher than `backoff_max`. Very small retry values can put pressure on a failing backend, so use them for local tests rather than shared infrastructure.
 
-Each service can also tune dashboard health probes:
+Active target probes run only with `--dashboard`; normal tunnel processes do
+not generate background health traffic. Each service can tune dashboard health
+probes for targets that support
+active probing:
 
 ```toml
 [services.api.health]
@@ -171,7 +178,8 @@ probe_backoff_max = "30s"
 Successful probes wait `probe_interval` before checking again. Failed probes
 retry with exponential backoff from `probe_backoff_initial` to
 `probe_backoff_max`. These values only affect the dashboard's target
-reachability signal; client connection retries still use `[services.api.connection]`.
+reachability signal for targets that implement a cheap probe; client connection
+retries still use `[services.api.connection]`.
 
 ## Limitations
 

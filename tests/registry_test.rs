@@ -43,8 +43,8 @@ impl Target for EchoTarget {
         "fake://echo".to_string()
     }
 
-    async fn probe(&self) -> anyhow::Result<()> {
-        Ok(())
+    async fn probe(&self) -> Option<anyhow::Result<()>> {
+        Some(Ok(()))
     }
 }
 
@@ -90,8 +90,8 @@ impl Target for FlakyTarget {
         "fake://flaky".to_string()
     }
 
-    async fn probe(&self) -> anyhow::Result<()> {
-        Ok(())
+    async fn probe(&self) -> Option<anyhow::Result<()>> {
+        Some(Ok(()))
     }
 }
 
@@ -298,7 +298,7 @@ async fn rapid_same_name_restarts_track_each_retiring_generation() {
     let first_port = free_port();
     let second_port = free_port();
     let health = HealthRegistry::default();
-    let mut registry = Registry::with_health(health.clone());
+    let mut registry = Registry::with_health_probes(health.clone(), true);
 
     registry
         .start(

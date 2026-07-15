@@ -2,7 +2,6 @@ use std::io;
 
 use async_trait::async_trait;
 use bollard::Docker;
-use bollard::container::LogOutput;
 use bollard::errors::Error as BollardError;
 use bollard::exec::{CreateExecOptions, StartExecResults};
 use futures_util::StreamExt;
@@ -62,9 +61,20 @@ impl Target for DockerTarget {
 
         match started {
             StartExecResults::Attached { output, input } => {
-                let reader = StreamReader::new(
-                    output.map(|frame| frame.map(LogOutput::into_bytes).map_err(io::Error::other)),
-                );
+                let frame_container = container.clone();
+                let reader = StreamReader::new(output.map(move |frame| {
+                    frame
+                        .map(|log_output| {
+                            let bytes = log_output.into_bytes();
+                            debug!(
+                                container = %frame_container,
+                                bytes = bytes.len(),
+                                "docker_exec_output_frame"
+                            );
+                            bytes
+                        })
+                        .map_err(io::Error::other)
+                }));
 
                 Ok(Box::new(tokio::io::join(reader, input)))
             }

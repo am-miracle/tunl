@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tunl::config::ConnectionPolicy;
+use tunl::health::HealthRegistry;
 use tunl::io::AsyncReadWrite;
 use tunl::registry::{ExitReason, Registry};
 use tunl::target::Target;
@@ -270,4 +271,41 @@ async fn update_policy_applies_to_new_connections_without_restarting() {
 async fn update_policy_returns_false_for_an_unknown_service() {
     let mut registry = Registry::new();
     assert!(!registry.update_policy("does-not-exist", ConnectionPolicy::default()));
+}
+
+#[tokio::test]
+async fn rapid_same_name_restarts_track_each_retiring_generation() {
+    let first_port = free_port();
+    let second_port = free_port();
+    let health = HealthRegistry::default();
+    let mut registry = Registry::with_health(health.clone());
+
+    registry
+        .start(
+            "svc".to_string(),
+            localhost(first_port),
+            echo(),
+            ConnectionPolicy::default(),
+        )
+        .await
+        .unwrap();
+    assert!(registry.stop("svc"));
+
+    registry
+        .start(
+            "svc".to_string(),
+            localhost(second_port),
+            echo(),
+            ConnectionPolicy::default(),
+        )
+        .await
+        .unwrap();
+    assert!(registry.stop("svc"));
+
+    for _ in 0..2 {
+        let (name, reason) = registry.join_next().await.unwrap();
+        assert_eq!(name, "svc");
+        assert_eq!(reason, ExitReason::Retired);
+    }
+    assert!(health.snapshots().is_empty());
 }

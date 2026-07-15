@@ -97,6 +97,21 @@ curl localhost:8080             # reaches the pod
 
 Press Ctrl+C to stop. `tunl` lets active connections finish, then exits.
 
+Add `--dashboard` for a live terminal view of every service, its target,
+passive connection status, and active connection count. Press `q`, Escape, or
+Ctrl+C to stop:
+
+```sh
+tunl --config config.toml --dashboard
+```
+
+`Listening` means the local port is ready but no target connection has
+succeeded yet. `Last up` records the most recent successful target connection,
+while `Connecting` and `Retrying` reflect clients currently waiting for a
+target. The dashboard does not probe idle backends in the background, so an
+idle service that previously connected successfully remains `Last up` until a
+new client attempt observes a failure.
+
 Add `--json` for structured logs you can pipe into `jq` or a log collector:
 
 ```sh

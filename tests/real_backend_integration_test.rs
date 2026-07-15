@@ -5,6 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tunl::config::ConnectionPolicy;
+use tunl::health::HealthRegistry;
 use tunl::target::Target;
 
 fn real_backends_enabled() -> bool {
@@ -31,11 +32,17 @@ async fn assert_target_response(
     let target: Arc<dyn Target> = Arc::from(tunl::target::from_uri(service, target_uri)?);
     let token = CancellationToken::new();
     let (_policy_tx, policy_rx) = tokio::sync::watch::channel(test_policy());
+    let health = HealthRegistry::default().register(
+        service.to_string(),
+        ([127, 0, 0, 1], port).into(),
+        target.describe(),
+    );
     let handle = tokio::spawn(tunl::tunnel::run(
         service.to_string(),
         target,
         listener,
         policy_rx,
+        health,
         token.child_token(),
     ));
 

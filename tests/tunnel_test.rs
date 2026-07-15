@@ -7,6 +7,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tunl::backoff::Backoff;
 use tunl::config::ConnectionPolicy;
+use tunl::health::{HealthRegistry, ServiceHealth};
 use tunl::io::AsyncReadWrite;
 use tunl::target::Target;
 
@@ -48,6 +49,14 @@ impl Target for FakeTarget {
     }
 }
 
+fn service_health(port: u16) -> ServiceHealth {
+    HealthRegistry::default().register(
+        "test".to_string(),
+        ([127, 0, 0, 1], port).into(),
+        "fake://target".to_string(),
+    )
+}
+
 async fn spawn_tunnel_with_policy(
     target: Arc<FakeTarget>,
     connection: ConnectionPolicy,
@@ -62,6 +71,7 @@ async fn spawn_tunnel_with_policy(
         target,
         listener,
         policy_rx,
+        service_health(port),
         token.child_token(),
     ));
     (port, token)
@@ -126,6 +136,7 @@ async fn tunnel_accept_loop_stops_on_cancel() {
     // Spawn a tunnel with a target that always fails (so no bridges are open).
     // Cancel the token and verify that the tunnel task finishes quickly.
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
     let token = CancellationToken::new();
     let target: Arc<dyn Target> = FakeTarget::new(usize::MAX);
     let (_policy_tx, policy_rx) = tokio::sync::watch::channel(ConnectionPolicy::default());
@@ -135,6 +146,7 @@ async fn tunnel_accept_loop_stops_on_cancel() {
         target,
         listener,
         policy_rx,
+        service_health(port),
         token.child_token(),
     ));
 

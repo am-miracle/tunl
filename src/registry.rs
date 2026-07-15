@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::config::ConnectionPolicy;
+use crate::health::{HealthRegistry, ServiceHealth};
 use crate::target::Target;
 
 /// Why a task left the registry.
@@ -21,8 +22,20 @@ pub enum ExitReason {
 struct ActiveEntry {
     token: CancellationToken,
     address: SocketAddr,
+    health: ServiceHealth,
     // Paired with the Receiver tunnel::run samples per connection; see update_policy.
     policy: watch::Sender<ConnectionPolicy>,
+}
+
+struct RetiringEntry {
+    name: String,
+    address: SocketAddr,
+    health: ServiceHealth,
+}
+
+struct TaskExit {
+    name: String,
+    health: ServiceHealth,
 }
 
 /// Tracks running tunnel tasks by service name so one service can be
@@ -35,17 +48,23 @@ struct ActiveEntry {
 /// what makes reusing a port across a reload safe instead of racy.
 pub struct Registry {
     root: CancellationToken,
+    health: HealthRegistry,
     active: HashMap<String, ActiveEntry>,
-    retiring: HashMap<String, SocketAddr>,
-    tasks: JoinSet<String>,
+    retiring: Vec<RetiringEntry>,
+    tasks: JoinSet<TaskExit>,
 }
 
 impl Registry {
     pub fn new() -> Self {
+        Self::with_health(HealthRegistry::default())
+    }
+
+    pub fn with_health(health: HealthRegistry) -> Self {
         Self {
             root: CancellationToken::new(),
+            health,
             active: HashMap::new(),
-            retiring: HashMap::new(),
+            retiring: Vec::new(),
             tasks: JoinSet::new(),
         }
     }
@@ -65,11 +84,27 @@ impl Registry {
         let token = self.root.child_token();
         let run_token = token.clone();
         let run_name = name.clone();
+        let service_health = self
+            .health
+            .register(name.clone(), address, target.describe());
+        let run_health = service_health.clone();
+        let task_health = service_health.clone();
         let (policy_tx, policy_rx) = watch::channel(connection);
 
         self.tasks.spawn(async move {
-            crate::tunnel::run(run_name.clone(), target, listener, policy_rx, run_token).await;
-            run_name
+            crate::tunnel::run(
+                run_name.clone(),
+                target,
+                listener,
+                policy_rx,
+                run_health,
+                run_token,
+            )
+            .await;
+            TaskExit {
+                name: run_name,
+                health: task_health,
+            }
         });
 
         self.active.insert(
@@ -77,6 +112,7 @@ impl Registry {
             ActiveEntry {
                 token,
                 address,
+                health: service_health,
                 policy: policy_tx,
             },
         );
@@ -118,8 +154,13 @@ impl Registry {
         let Some(entry) = self.active.remove(name) else {
             return false;
         };
+        entry.health.mark_draining();
         entry.token.cancel();
-        self.retiring.insert(name.to_string(), entry.address);
+        self.retiring.push(RetiringEntry {
+            name: name.to_string(),
+            address: entry.address,
+            health: entry.health,
+        });
         true
     }
 
@@ -128,7 +169,12 @@ impl Registry {
     pub fn cancel_all(&mut self) {
         self.root.cancel();
         for (name, entry) in self.active.drain() {
-            self.retiring.insert(name, entry.address);
+            entry.health.mark_draining();
+            self.retiring.push(RetiringEntry {
+                name,
+                address: entry.address,
+                health: entry.health,
+            });
         }
     }
 
@@ -136,18 +182,30 @@ impl Registry {
         loop {
             let joined = self.tasks.join_next().await?;
             match joined {
-                Ok(name) => {
-                    let reason = if self.retiring.remove(&name).is_some() {
+                Ok(exit) => {
+                    let retiring = self.retiring.iter().position(|entry| {
+                        entry.name == exit.name && entry.health.is_same_generation(&exit.health)
+                    });
+                    let reason = if let Some(index) = retiring {
+                        let retiring = self.retiring.remove(index);
+                        self.health.remove(&retiring.health);
                         ExitReason::Retired
                     } else {
                         // tunnel::run only returns after its token is
                         // cancelled. Getting here without us having stopped
                         // it means the task ended on its own; drop it rather
                         // than let stale bookkeeping claim a dead service.
-                        self.active.remove(&name);
+                        let is_active_generation = self
+                            .active
+                            .get(&exit.name)
+                            .is_some_and(|entry| entry.health.is_same_generation(&exit.health));
+                        if is_active_generation {
+                            self.active.remove(&exit.name);
+                            self.health.remove(&exit.health);
+                        }
                         ExitReason::Unexpected
                     };
-                    return Some((name, reason));
+                    return Some((exit.name, reason));
                 }
                 Err(e) => {
                     // A panic in one tunnel task should not take down the
@@ -159,7 +217,11 @@ impl Registry {
     }
 
     async fn await_port_free(&mut self, port: u16) {
-        while self.retiring.values().any(|address| address.port() == port) {
+        while self
+            .retiring
+            .iter()
+            .any(|entry| entry.address.port() == port)
+        {
             if self.join_next().await.is_none() {
                 break;
             }

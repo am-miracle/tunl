@@ -12,6 +12,7 @@ use tracing::{info, warn};
 use crate::backoff::Backoff;
 use crate::bridge;
 use crate::config::ConnectionPolicy;
+use crate::health::{ConnectionHealth, ServiceHealth};
 use crate::target::Target;
 
 pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -21,6 +22,7 @@ pub async fn run(
     target: Arc<dyn Target>,
     listener: TcpListener,
     policy: watch::Receiver<ConnectionPolicy>,
+    health: ServiceHealth,
     token: CancellationToken,
 ) {
     let connection = *policy.borrow();
@@ -59,6 +61,7 @@ pub async fn run(
                     stream,
                     peer,
                     connection,
+                    health.connection(),
                     token.child_token(),
                 ));
             }
@@ -76,11 +79,13 @@ async fn connect_and_bridge(
     stream: TcpStream,
     peer: SocketAddr,
     connection: ConnectionPolicy,
+    mut health: ConnectionHealth,
     token: CancellationToken,
 ) {
     let mut backoff = Backoff::with_base(connection.backoff_initial, connection.backoff_max);
 
     let remote = loop {
+        health.mark_connecting();
         info!(service = %service, %peer, "connect_attempt_started");
 
         let result = tokio::time::timeout(connection.connect_timeout, target.connect()).await;
@@ -95,6 +100,7 @@ async fn connect_and_bridge(
         };
 
         let delay = backoff.delay();
+        health.mark_retrying(&err);
         warn!(service = %service, %peer, error = %err, "connect_attempt_failed");
         warn!(service = %service, %peer, delay_secs = delay.as_secs_f32(), "connect_retry_sleep");
 
@@ -111,6 +117,7 @@ async fn connect_and_bridge(
         }
     };
 
+    health.mark_up();
     info!(service = %service, %peer, "bridge_started");
 
     // Pin the bridge future so we can hand it to both the normal path and the

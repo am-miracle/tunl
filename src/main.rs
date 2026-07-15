@@ -3,12 +3,14 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 use tunl::config::Service;
+use tunl::health::HealthRegistry;
 use tunl::registry::{ExitReason, Registry};
 use tunl::target::Target;
 
@@ -29,14 +31,31 @@ async fn main() {
 async fn run() -> anyhow::Result<()> {
     // Parse args before init so the first log line already honors --json.
     let args = parse_args()?;
-    init_tracing(args.json);
+    init_tracing(args.json, args.dashboard);
 
     let config = tunl::config::Config::load(&args.config)?;
     info!(count = config.services.len(), "loaded_services");
 
-    let mut registry = Registry::new();
+    let health = HealthRegistry::default();
+    let mut registry = Registry::with_health(health.clone());
     initial_start(&config.services, &mut registry).await?;
     let mut current_services = config.services;
+
+    let dashboard_stop = Arc::new(AtomicBool::new(false));
+    let (dashboard_quit_tx, mut dashboard_quit_rx) = mpsc::unbounded_channel();
+    let dashboard_task = if args.dashboard {
+        let stop = Arc::clone(&dashboard_stop);
+        let error_tx = dashboard_quit_tx.clone();
+        Some(tokio::task::spawn_blocking(move || {
+            let result = tunl::dashboard::run(health, dashboard_quit_tx, stop);
+            if result.is_err() {
+                let _ = error_tx.send(());
+            }
+            result
+        }))
+    } else {
+        None
+    };
 
     let (_watcher, mut reload_rx) = watch_config(&args.config)?;
     let mut watcher_alive = true;
@@ -44,6 +63,8 @@ async fn run() -> anyhow::Result<()> {
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
+
+            _ = dashboard_quit_rx.recv(), if args.dashboard => break,
 
             event = reload_rx.recv(), if watcher_alive => {
                 match event {
@@ -68,6 +89,11 @@ async fn run() -> anyhow::Result<()> {
     })
     .await
     .ok();
+
+    dashboard_stop.store(true, Ordering::Release);
+    if let Some(task) = dashboard_task {
+        task.await??;
+    }
 
     info!("shutdown_complete");
     Ok(())
@@ -215,26 +241,33 @@ fn watch_config(
 struct Args {
     config: PathBuf,
     json: bool,
+    dashboard: bool,
 }
 
-fn init_tracing(json: bool) {
+fn init_tracing(json: bool, dashboard: bool) {
     if json {
         tracing_subscriber::fmt().json().init();
+    } else if dashboard {
+        // Terminal output would corrupt the alternate-screen UI. Runtime
+        // events still fire; dashboard mode simply gives them a sink.
+        tracing_subscriber::fmt().with_writer(std::io::sink).init();
     } else {
         tracing_subscriber::fmt::init();
     }
 }
 
-const USAGE: &str = "usage: tunl --config <path> [--json]";
+const USAGE: &str = "usage: tunl --config <path> [--json | --dashboard]";
 
 fn parse_args() -> anyhow::Result<Args> {
     let mut config = None;
     let mut json = false;
+    let mut dashboard = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--json" => json = true,
+            "--dashboard" => dashboard = true,
             "--config" => {
                 let path = args
                     .next()
@@ -246,5 +279,12 @@ fn parse_args() -> anyhow::Result<Args> {
     }
 
     let config = config.ok_or_else(|| anyhow::anyhow!("--config is required\n{USAGE}"))?;
-    Ok(Args { config, json })
+    if json && dashboard {
+        anyhow::bail!("--json and --dashboard cannot be used together\n{USAGE}");
+    }
+    Ok(Args {
+        config,
+        json,
+        dashboard,
+    })
 }

@@ -1,7 +1,9 @@
 pub mod backoff;
 pub mod bridge;
 pub mod config;
+pub mod dashboard;
 pub mod error;
+pub mod health;
 pub mod io;
 pub mod listener;
 pub mod registry;

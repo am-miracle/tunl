@@ -36,11 +36,17 @@ async fn echo_round_trip() {
 
     let (_policy_tx, policy_rx) =
         tokio::sync::watch::channel(tunl::config::ConnectionPolicy::default());
+    let health = tunl::health::HealthRegistry::default().register(
+        "test".to_string(),
+        ([127, 0, 0, 1], tunnel_port).into(),
+        target.describe(),
+    );
     tokio::spawn(tunl::tunnel::run(
         "test".to_string(),
         target,
         tunnel_listener,
         policy_rx,
+        health,
         CancellationToken::new(),
     ));
 
